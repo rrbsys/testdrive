@@ -1,0 +1,86 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "testdrive"
+version = "0.1.0"
+description = "One CLI. Many vision foundation models."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [
+    { name = "testdrive contributors" },
+]
+keywords = ["computer-vision", "object-detection", "cli", "foundation-models"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+]
+dependencies = [
+    "Pillow>=10.0",
+]
+
+[project.optional-dependencies]
+# transformers is pinned exactly (not just a lower bound) because
+# versions after 4.50.3 introduced a regression that pulls in a
+# TensorFlow dependency chain, which in turn breaks every plugin here
+# (confirmed by hand; see requirements.txt). Revisit this pin once
+# that's fixed upstream.
+groundingdino = ["torch>=2.2", "transformers==4.50.3"]
+owlv2         = ["torch>=2.2", "transformers==4.50.3", "scipy"]
+owlvit        = ["torch>=2.2", "transformers==4.50.3"]
+florence2     = ["torch>=2.2", "transformers==4.50.3", "einops", "timm"]
+samgd         = ["torch>=2.2", "transformers==4.50.3", "numpy", "segment-anything"]
+# Note: the "segment-anything" PyPI package is an unofficial third-party
+# mirror (Meta doesn't publish SAM to PyPI themselves — their own
+# instructions are `pip install git+https://github.com/facebookresearch/segment-anything.git`).
+# It exposes the same `from segment_anything import ...` API we use and
+# works fine, but if you want the authoritative source, install that git
+# URL yourself instead before installing this extra.
+# Every active plugin's dependencies at once.
+all = ["testdrive[groundingdino,owlv2,owlvit,florence2,samgd]"]
+dev = ["pytest>=7.0", "ruff>=0.4", "mypy>=1.8"]
+
+[project.scripts]
+testdrive = "testdrive.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["testdrive*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_unused_ignores = true
+
+# None of these ship type stubs (or a py.typed marker) for mypy to find.
+# That's a fact about the libraries, not something this project can fix
+# by writing better code — silence the specific "can't find stub" noise
+# here rather than sprinkling `# type: ignore[import-not-found]` at every
+# call site. Strict mode still applies to everything *we* write; these
+# imports just get treated as returning Any, same as any other untyped
+# third-party dependency would under `strict`.
+[[tool.mypy.overrides]]
+module = [
+    "torch.*",
+    "transformers.*",
+    "huggingface_hub.*",
+    "segment_anything.*",
+    "einops.*",
+    "timm.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
