@@ -43,6 +43,11 @@ class DetectionResult:
     prompt: str
     threshold: float
 
+    #: Which model variant was actually used, for plugins that declare
+    #: more than one (see PluginManifest.models / --model). Empty for
+    #: every plugin with just one fixed model.
+    model: str = ""
+
     # --- outputs ---
     detections: list[Detection] = field(default_factory=list)
     elapsed_ms: float = 0.0
@@ -63,6 +68,10 @@ class DetectionResult:
             f"Image    : {self.image_path.name}  ({self.image_size[0]}x{self.image_size[1]})",
             f'Prompt   : "{self.prompt}"',
             f"Threshold: {self.threshold:.2f}",
+        ]
+        if self.model:
+            lines.append(f"Model    : {self.model}")
+        lines += [
             f"Matches  : {self.count}",
             f"Time     : {self.elapsed_ms:.0f} ms",
         ]
@@ -119,6 +128,19 @@ class PluginManifest:
     #: distribution flat-shaded shapes than a real photo would need).
     #: An explicit --threshold on the CLI always overrides this.
     test_threshold: str = "default"
+
+    #: For plugins with multiple selectable model variants (e.g. YOLO11's
+    #: n/s/m/l/x sizes): the full list of valid choices, and which one is
+    #: the default. Empty ``models`` means the plugin has exactly one
+    #: fixed model and --model doesn't apply to it (see
+    #: DetectorPlugin.set_model_override).
+    models: list[str] = field(default_factory=list)
+    model: str = ""
+
+    #: For fixed-vocabulary plugins (e.g. YOLO11's 80 COCO classes):
+    #: every class the model can report. Empty for open-vocabulary
+    #: plugins, which accept arbitrary prompt text instead.
+    classes: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PluginManifest":

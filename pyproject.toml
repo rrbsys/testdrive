@@ -45,8 +45,11 @@ samgd         = ["torch>=2.2", "transformers==4.50.3", "numpy", "segment-anythin
 # It exposes the same `from segment_anything import ...` API we use and
 # works fine, but if you want the authoritative source, install that git
 # URL yourself instead before installing this extra.
+# yolo11 doesn't use transformers at all, so it's unaffected by the pin
+# above — just torch + ultralytics.
+yolo11        = ["torch>=2.2", "ultralytics>=8.3"]
 # Every active plugin's dependencies at once.
-all = ["testdrive[groundingdino,owlv2,owlvit,florence2,samgd]"]
+all = ["testdrive[groundingdino,owlv2,owlvit,florence2,samgd,yolo11]"]
 dev = ["pytest>=7.0", "ruff>=0.4", "mypy>=1.8"]
 
 [project.scripts]

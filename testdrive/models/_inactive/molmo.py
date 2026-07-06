@@ -1,9 +1,29 @@
-"""Molmo detector plugin — defaults to MolmoE-1B-0924 (mixture-of-experts,
-~1B active parameters), chosen specifically for being CPU-tractable. The
-larger dense Molmo-7B-D didn't finish a self-test/-TT run within 30
-minutes on an 8-core CPU even after switching to bfloat16 (see
-models/_inactive/molmo7b.py for that variant, parked rather than
-deleted, along with the reasoning for why it's parked).
+"""Molmo detector plugin — PARKED, not currently discovered.
+
+This lives in ``models/_inactive/`` (see ``pluginloader.
+iter_loadable_plugins`` for why that's invisible to the framework), so
+it is intentionally *not* loaded by the framework right now. Move it
+back to ``models/`` (and fix its relative imports from ``...`` back to
+``..`` — see git history / molmo7b.py's note for why that matters) if
+you want to reactivate it.
+
+Points at MolmoE-1B-0924 (mixture-of-experts, ~1B *active* parameters
+per token) rather than the larger dense Molmo-7B-D (parked separately
+as ``molmo7b.py``) — chosen on the assumption that fewer active
+parameters would mean a lighter, faster plugin. That assumption was
+wrong in the way that matters most for a CLI tool: MoE models store
+*every* expert on disk regardless of how many activate per token, so
+the download is essentially the same size either way — this "slim"
+1B-active model still downloads ~29GB of fp32 weights.
+
+Concretely: ``-TT molmo`` did eventually **pass** (confirmed on
+real hardware, Wine/macOS) — but took roughly 11 minutes for one
+synthetic-image detection, after an initialize() step that dwarfs that.
+That's not a hard failure, but it's also not something a "try before
+you install anything big" CLI tool should default to running. Parked
+rather than deleted so the option stays available for anyone with the
+patience, a GPU, or a genuine need for Molmo's pointing/counting
+capabilities specifically.
 """
 
 from __future__ import annotations

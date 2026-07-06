@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib
 from abc import ABC, abstractmethod
+from dataclasses import replace
 from typing import Any
 
 from .detection import Detection, PluginManifest
@@ -53,3 +54,29 @@ class DetectorPlugin(ABC):
             except ImportError:
                 missing.append(req["pip"])
         return (len(missing) == 0, missing)
+
+    def set_model_override(self, model: str) -> None:
+        """Override which model variant to load (the CLI's --model).
+
+        Only meaningful for plugins that declare more than one choice in
+        ``manifest.models`` (e.g. YOLO11's n/s/m/l/x sizes) — plugins
+        with a single fixed model reject any override. The default
+        implementation validates ``model`` against ``manifest.models``
+        and swaps ``manifest.model``; plugins just need to read
+        ``self.manifest.model`` in ``initialize()`` to pick the right
+        file/repo.
+
+        Replaces ``self.manifest`` with a new instance (dataclasses.
+        replace) rather than mutating it in place — ``LoadedPlugin.
+        instantiate()`` hands every instance the *same* PluginManifest
+        object by reference, so an in-place mutation would leak into
+        every other instance of this plugin for the rest of the process.
+        """
+        if not self.manifest.models:
+            raise ValueError(f"plugin '{self.manifest.id}' does not support --model (no models declared)")
+        if model not in self.manifest.models:
+            raise ValueError(
+                f"invalid model '{model}' for plugin '{self.manifest.id}'; "
+                f"choices: {', '.join(self.manifest.models)}"
+            )
+        self.manifest = replace(self.manifest, model=model)
