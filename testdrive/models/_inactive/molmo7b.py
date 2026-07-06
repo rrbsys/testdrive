@@ -1,4 +1,19 @@
-"""Molmo detector plugin."""
+"""Molmo-7B-D detector plugin — PARKED, not currently discovered.
+
+This lives in ``models/_inactive/`` (see ``pluginloader.
+iter_loadable_plugins`` for why that's invisible to the framework).
+
+The dense 7B model here ran *stable* once loaded in bfloat16 (see
+initialize()), but didn't finish a self-test/-TT run within 30 minutes
+on an 8-core CPU. ``models/molmo.py`` (id ``molmo``, distinct from this
+file's ``molmo7b``) points at MolmoE-1B-0924 instead — a
+mixture-of-experts variant that turned out to have basically the same
+~29GB download despite fewer *active* parameters per token, so it's
+also currently parked (see its own docstring). Move this file back to
+``models/`` (and fix its relative imports from ``...`` back to ``..``)
+if you specifically want this larger dense model's presumably-better
+accuracy and have the hardware/patience for it.
+"""
 
 from __future__ import annotations
 
@@ -13,13 +28,13 @@ from ...util import load_processor, load_model
 if TYPE_CHECKING:
     from PIL import Image as PILImage
 
-log = logging.getLogger("testdrive.models.molmo")
+log = logging.getLogger("testdrive.models._inactive.molmo7b")
 
 PLUGIN_API = 1
 
 PLUGIN = {
-    "id": "molmo",
-    "name": "Molmo",
+    "id": "molmo7b",
+    "name": "Molmo-7B-D (parked, see module docstring)",
     "version": "0.1.0",
     "api": PLUGIN_API,
     "description": "Multimodal open-vocabulary detection from AllenAI.",

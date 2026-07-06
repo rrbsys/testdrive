@@ -120,7 +120,7 @@ def _validate_detections(
     return len(detections)
 
 
-def run_selftest(plugin_id: str) -> SelfTestResult:
+def run_selftest(plugin_id: str, model_override: str | None = None) -> SelfTestResult:
     """Run the self-test for *plugin_id* and return a :class:`SelfTestResult`.
 
     This is the main entry point called by the CLI.  It never raises;
@@ -142,10 +142,23 @@ def run_selftest(plugin_id: str) -> SelfTestResult:
         result.failures.append(str(exc))
         return result
 
+    plugin = loaded.instantiate()
+
+    # ------------------------------------------------------------------ #
+    # Step 1.5: --model override, if given (see DetectorPlugin.set_model_override)
+    # ------------------------------------------------------------------ #
+    if model_override:
+        try:
+            plugin.set_model_override(model_override)
+            result.add_step("model override", ok=True, note=model_override)
+        except ValueError as exc:
+            result.add_step("model override", ok=False, note=str(exc))
+            result.failures.append(str(exc))
+            return result
+
     # ------------------------------------------------------------------ #
     # Step 2: dependency check
     # ------------------------------------------------------------------ #
-    plugin = loaded.instantiate()
     installed, missing = plugin.is_installed()
     if not installed:
         note = "missing: " + ", ".join(missing)

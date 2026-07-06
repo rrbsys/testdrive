@@ -129,6 +129,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="write all -matches/-redacted output images here instead of next to "
         "each input image (created if it doesn't exist)",
     )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default=None,
+        metavar="NAME",
+        help="override a plugin's default model variant, for plugins that declare more "
+        "than one (see manifest 'models', e.g. yolo11n/s/m/l/x). No effect on plugins "
+        "with a single fixed model.",
+    )
 
     parser.add_argument("plugin", nargs="?", help="plugin id, e.g. owlv2 ('*' = all plugins)")
     parser.add_argument("image", nargs="?", help="path to an input image, or a directory of images")
@@ -197,6 +206,23 @@ def _print_manifest_text(m: PluginManifest) -> None:
         print("Requirements")
         for req in m.requirements:
             print(f"    - {req['pip']}  (import {req['module']})")
+        print()
+    if m.models:
+        print(f"Models         : {', '.join(m.models)}")
+        print(f"Default model  : {m.model}  (override with --model)")
+        print()
+    if m.classes:
+        print(f"Classes ({len(m.classes)})")
+        # Wrap into readable rows rather than one giant line/one-per-line.
+        row, width = [], 0
+        for c in m.classes:
+            row.append(c)
+            width += len(c) + 2
+            if width > 70:
+                print("    " + ", ".join(row))
+                row, width = [], 0
+        if row:
+            print("    " + ", ".join(row))
         print()
     if m.sample_prompt:
         print(f'Sample prompt  : "{m.sample_prompt}"')
@@ -305,10 +331,10 @@ def cmd_installed(as_json: bool) -> int:
 # ---------------------------------------------------------------------------
 
 
-def cmd_selftest(plugin_id: str, as_json: bool) -> int:
+def cmd_selftest(plugin_id: str, as_json: bool, model_override: str | None = None) -> int:
     from .selftest import run_selftest
 
-    result = run_selftest(plugin_id)
+    result = run_selftest(plugin_id, model_override=model_override)
 
     if as_json:
         print(
@@ -338,7 +364,7 @@ def cmd_selftest(plugin_id: str, as_json: bool) -> int:
         return ExitCode.INFERENCE_FAILED
 
 
-def cmd_selftest_loop(as_json: bool) -> int:
+def cmd_selftest_loop(as_json: bool, model_override: str | None = None) -> int:
     """``-T '*'``: run the self-test for every discovered plugin.
 
     Handy for a full cache rebuild (every plugin gets initialized, so
@@ -356,7 +382,7 @@ def cmd_selftest_loop(as_json: bool) -> int:
     n_passed = 0
     json_out = []
     for i, plugin_id in enumerate(ids):
-        result = run_selftest(plugin_id)
+        result = run_selftest(plugin_id, model_override=model_override)
         if result.passed:
             n_passed += 1
         else:
@@ -399,6 +425,7 @@ def _run_detect_one(
     threshold: float,
     plugin_suffix: str | None = None,
     output_dir: Path | None = None,
+    model_override: str | None = None,
 ) -> tuple[int, "DetectionResult | None", str | None]:
     """Run detection for a single (plugin, image) pair. Returns
     (exit_code, result, error).
@@ -414,6 +441,15 @@ def _run_detect_one(
         return ExitCode.PLUGIN_NOT_FOUND, None, f"plugin '{plugin_id}' could not be loaded: {exc}"
 
     plugin = loaded.instantiate()
+
+    # 1.5. --model override, if given (a CLI-level user-input error, so
+    # checked before dependencies — an invalid model name is wrong
+    # regardless of what's installed)
+    if model_override:
+        try:
+            plugin.set_model_override(model_override)
+        except ValueError as exc:
+            return ExitCode.CLI_ERROR, None, str(exc)
 
     # 2. dependency check
     installed, missing = plugin.is_installed()
@@ -484,6 +520,7 @@ def _run_detect_one(
         plugin_version=plugin.manifest.version,
         prompt=prompt,
         threshold=threshold,
+        model=plugin.manifest.model if plugin.manifest.models else "",
         detections=detections,
         elapsed_ms=elapsed_ms,
         matches_path=matches_path.resolve(),
@@ -543,6 +580,7 @@ def cmd_detect_dispatch(
     threshold: float,
     as_json: bool,
     output_dir: Path | None,
+    model_override: str | None = None,
 ) -> int:
     """Handle ``<plugin> <image> <prompt>``, where ``<plugin>`` may be
     ``'*'`` (every discovered plugin) and ``<image>`` may be a directory
@@ -573,6 +611,7 @@ def cmd_detect_dispatch(
             prompt,
             threshold,
             output_dir=output_dir,
+            model_override=model_override,
         )
         if error:
             log.error("%s", error)
@@ -607,6 +646,7 @@ def cmd_detect_dispatch(
                 threshold,
                 plugin_suffix=plugin_suffix,
                 output_dir=output_dir,
+                model_override=model_override,
             )
             if exit_code == ExitCode.SUCCESS:
                 n_passed += 1
@@ -705,7 +745,10 @@ def _resolve_test_threshold(plugin_id: str, cli_threshold: float | None) -> floa
 
 
 def _run_example_test_one(
-    plugin_id: str, threshold: float | None, output_dir: Path
+    plugin_id: str,
+    threshold: float | None,
+    output_dir: Path,
+    model_override: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Run one plugin's example test. Returns ``(exit_code, info)`` where
     ``info`` has enough detail for both text and ``--json`` presentation.
@@ -730,6 +773,7 @@ def _run_example_test_one(
         prompt,
         eff_threshold,
         output_dir=output_dir,
+        model_override=model_override,
     )
 
     if error:
@@ -766,6 +810,7 @@ def cmd_example_test(
     as_json: bool,
     threshold: float | None,
     output_dir: Path | None,
+    model_override: str | None = None,
 ) -> int:
     """``-TT PLUGIN`` (or ``-T -T PLUGIN``, or ``'*'`` for every plugin):
     a real correctness check, not just "did it run" — finds
@@ -791,7 +836,9 @@ def cmd_example_test(
     last_exit_code = ExitCode.SUCCESS
 
     for i, plugin_id in enumerate(plugin_ids):
-        exit_code, info = _run_example_test_one(plugin_id, threshold, out_dir)
+        exit_code, info = _run_example_test_one(
+            plugin_id, threshold, out_dir, model_override=model_override
+        )
         last_exit_code = exit_code
         if info.get("passed"):
             n_passed += 1
@@ -882,12 +929,14 @@ def main(argv: list[str] | None = None) -> int:
     if ns.example_test:
         set_downloads_allowed(True)  # -TT explicitly populates the cache
         output_dir = Path(ns.output_dir) if ns.output_dir else None
-        return cmd_example_test(ns.example_test, ns.json, ns.threshold, output_dir)
+        return cmd_example_test(
+            ns.example_test, ns.json, ns.threshold, output_dir, model_override=ns.model
+        )
     if ns.selftest:
         set_downloads_allowed(True)  # -T explicitly populates the cache
         if ns.selftest == LOOP_ALL:
-            return cmd_selftest_loop(ns.json)
-        return cmd_selftest(ns.selftest, ns.json)
+            return cmd_selftest_loop(ns.json, model_override=ns.model)
+        return cmd_selftest(ns.selftest, ns.json, model_override=ns.model)
 
     if ns.plugin and ns.image and ns.prompt:
         # A plain detect run should never turn into a surprise multi-GB
@@ -903,6 +952,7 @@ def main(argv: list[str] | None = None) -> int:
             threshold=threshold,
             as_json=ns.json,
             output_dir=output_dir,
+            model_override=ns.model,
         )
 
     positional = [x for x in (ns.plugin, ns.image, ns.prompt) if x]
