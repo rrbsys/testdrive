@@ -169,7 +169,9 @@ def ensure_local_repo(repo: str, cd: Path) -> Path:
     return local_dir
 
 
-def load_processor(repo: str, cd: Path, processor_class: type[Any] | None = None, **kwargs: Any) -> Any:
+def load_processor(
+    repo: str, cd: Path, processor_class: type[Any] | None = None, **kwargs: Any
+) -> Any:
     """Robust processor loader with multiple fallbacks.
 
     Downloads the full repo into a plain local directory first (see

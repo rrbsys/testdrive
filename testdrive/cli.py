@@ -745,7 +745,10 @@ def _resolve_test_threshold(plugin_id: str, cli_threshold: float | None) -> floa
 
 
 def _run_example_test_one(
-    plugin_id: str, threshold: float | None, output_dir: Path, model_override: str | None = None,
+    plugin_id: str,
+    threshold: float | None,
+    output_dir: Path,
+    model_override: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Run one plugin's example test. Returns ``(exit_code, info)`` where
     ``info`` has enough detail for both text and ``--json`` presentation.
@@ -833,7 +836,9 @@ def cmd_example_test(
     last_exit_code = ExitCode.SUCCESS
 
     for i, plugin_id in enumerate(plugin_ids):
-        exit_code, info = _run_example_test_one(plugin_id, threshold, out_dir, model_override=model_override)
+        exit_code, info = _run_example_test_one(
+            plugin_id, threshold, out_dir, model_override=model_override
+        )
         last_exit_code = exit_code
         if info.get("passed"):
             n_passed += 1
@@ -924,7 +929,9 @@ def main(argv: list[str] | None = None) -> int:
     if ns.example_test:
         set_downloads_allowed(True)  # -TT explicitly populates the cache
         output_dir = Path(ns.output_dir) if ns.output_dir else None
-        return cmd_example_test(ns.example_test, ns.json, ns.threshold, output_dir, model_override=ns.model)
+        return cmd_example_test(
+            ns.example_test, ns.json, ns.threshold, output_dir, model_override=ns.model
+        )
     if ns.selftest:
         set_downloads_allowed(True)  # -T explicitly populates the cache
         if ns.selftest == LOOP_ALL:
