@@ -62,11 +62,29 @@ self-relaunch is invisible from then on. (Set
 `TESTDRIVE_SKIP_PYENV_CHECK=1` to bypass this entirely; used by CI's
 core-only smoke test, not intended for normal use.)
 
-Each plugin's manifest also carries a `pyenv` field (`-M <plugin>`),
-currently always `"framework"` — the mechanism for a plugin to
-actually get its own isolated environment (for a dependency set that's
-incompatible with everything else) is tracked as follow-up work, not
-built yet. See `testdrive/pyenv.py`'s module docstring for the reasoning.
+Each plugin's manifest also carries a `pyenv` field (`-M <plugin>`).
+Every plugin here uses the default, `"framework"`, and runs in-process
+like normal. A plugin can declare a different value (e.g. `"modelx"`)
+to signal it needs isolation from the shared dependency set — set up
+that plugin's environment the same way:
+
+```bash
+python3.12 -m venv cache/pyenv/modelx
+cache/pyenv/modelx/bin/pip install -e . -e ".[modelx]"
+```
+
+When a plugin's `pyenv` isn't `"framework"`, testdrive transparently
+runs it in a worker subprocess using that environment's interpreter
+instead of in-process — two conflicting dependency sets can't coexist
+in one running Python process, so this is a real process boundary, not
+just a metadata label. That worker is spawned lazily on first use and
+kept alive for the rest of the invocation, specifically so a
+loop-mode run over many images pays that plugin's `initialize()` cost
+once, not once per image. If the declared environment doesn't exist
+yet, you get the same kind of clear "here's the exact command to set
+it up" message as the framework environment's own guard, rather than a
+crash. See `testdrive/pyenv.py`, `worker_main.py`, and `worker_pool.py`
+for the full mechanism and wire protocol.
 
 ## Installation
 

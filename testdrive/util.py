@@ -62,6 +62,25 @@ def set_downloads_allowed(allowed: bool) -> None:
     _downloads_allowed = allowed
 
 
+def get_downloads_allowed() -> bool:
+    """Current value set by set_downloads_allowed() (default True).
+
+    Used by worker_pool.py to propagate this process's setting to a
+    worker subprocess, which doesn't inherit Python module state across
+    the process boundary the way it would if everything ran in one
+    process.
+    """
+    return _downloads_allowed
+
+
+def get_max_parallel_files() -> int | None:
+    """Current value set by set_max_parallel_files() (default None).
+
+    Same propagation purpose as get_downloads_allowed().
+    """
+    return _max_parallel_files
+
+
 class ExitCode:
     """Process exit codes, documented so testdrive scripts/CI nicely."""
 

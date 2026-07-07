@@ -6,9 +6,10 @@ Why this exists: plugging more and more model plugins into the same
 Python installation is a guaranteed road to dependency hell (the
 "tensorflow disaster" we already hit once with transformers). Rather
 than let that accumulate silently, testdrive insists on a single,
-known-good, dedicated environment for the framework itself (plugins
-that need their own incompatible environment are a separate, larger
-mechanism — see PluginManifest.pyenv's docstring).
+known-good, dedicated environment for the framework itself. Plugins
+that need their own incompatible environment get one for real, via a
+worker subprocess — see ``worker_pool.py`` / ``worker_main.py`` and
+``PluginManifest.pyenv``'s docstring.
 
 If testdrive is started from anywhere else, it tries to transparently
 relaunch itself from ``cache/pyenv/framework`` if that environment

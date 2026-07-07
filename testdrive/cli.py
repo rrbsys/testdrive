@@ -445,25 +445,37 @@ def _run_detect_one(
 
     # 1.5. --model override, if given (a CLI-level user-input error, so
     # checked before dependencies — an invalid model name is wrong
-    # regardless of what's installed)
+    # regardless of what's installed). Safe to do here even for
+    # worker-routed plugins below: this only touches static manifest
+    # data (dataclasses.replace), no heavy imports.
     if model_override:
         try:
             plugin.set_model_override(model_override)
         except ValueError as exc:
             return ExitCode.CLI_ERROR, None, str(exc)
 
-    # 2. dependency check
-    installed, missing = plugin.is_installed()
-    if not installed:
-        msg = (
-            f"plugin '{plugin_id}' is missing dependencies:\n    "
-            + "\n    ".join(missing)
-            + "\n\nInstall with:  pip install "
-            + " ".join(f'"{p}"' for p in missing)
-        )
-        return ExitCode.MISSING_DEPENDENCY, None, msg
+    # Plugins with a non-"framework" pyenv can't be dependency-checked,
+    # initialized, or run in this process at all — their dependencies
+    # live in a different environment entirely (that's the whole point
+    # of declaring a different pyenv; see PluginManifest.pyenv). Those
+    # three steps happen on the other side of a worker subprocess
+    # instead — see pyenv.py / worker_main.py / worker_pool.py.
+    uses_worker = plugin.manifest.pyenv != "framework"
 
-    # 3. load image
+    if not uses_worker:
+        # 2. dependency check
+        installed, missing = plugin.is_installed()
+        if not installed:
+            msg = (
+                f"plugin '{plugin_id}' is missing dependencies:\n    "
+                + "\n    ".join(missing)
+                + "\n\nInstall with:  pip install "
+                + " ".join(f'"{p}"' for p in missing)
+            )
+            return ExitCode.MISSING_DEPENDENCY, None, msg
+
+    # 3. load image (always in-process — core Pillow work, unaffected
+    # by which pyenv a plugin declares)
     try:
         image = load_image(image_path)
     except FileNotFoundError as exc:
@@ -474,31 +486,69 @@ def _run_detect_one(
     width, height = image.size
     log.info("image loaded: %s (%dx%d)", image_path.name, width, height)
 
-    # 4. initialize plugin
-    try:
-        log.info("initializing plugin '%s' ...", plugin_id)
-        plugin.initialize()
-    except CacheNotPopulatedError as exc:
-        return (
-            ExitCode.MISSING_DEPENDENCY,
-            None,
-            (
-                f"plugin '{plugin_id}' needs its model downloaded first ({exc}). "
-                f"Run `testdrive -T {plugin_id}` (or -TT {plugin_id}) once to populate the "
-                f"cache, then re-run this command."
-            ),
-        )
-    except Exception as exc:  # noqa: BLE001
-        return ExitCode.INFERENCE_FAILED, None, f"plugin '{plugin_id}' initialize() failed: {exc}"
+    if uses_worker:
+        # 4 + 5 (worker path): a worker subprocess, kept alive across
+        # this whole testdrive invocation, handles dependency checking,
+        # initialize(), and detect() on the other side of the process
+        # boundary — so a loop-mode run over many images only pays this
+        # plugin's initialize() cost once, not once per image.
+        from .cache import cache_dir
+        from .worker_pool import WorkerError, get_pool
 
-    # 5. run inference
-    try:
-        log.info("running detection: prompt=%r threshold=%.2f", prompt, threshold)
-        t0 = time.perf_counter()
-        detections = plugin.detect(image, prompt, threshold=threshold)
-        elapsed_ms = (time.perf_counter() - t0) * 1000
-    except Exception as exc:  # noqa: BLE001
-        return ExitCode.INFERENCE_FAILED, None, f"plugin '{plugin_id}' detect() raised: {exc}"
+        try:
+            worker = get_pool().get(plugin_id, plugin.manifest.pyenv, cache_dir())
+            log.info(
+                "running detection via '%s' worker: prompt=%r threshold=%.2f",
+                plugin.manifest.pyenv, prompt, threshold,
+            )
+            t0 = time.perf_counter()
+            detections = worker.detect(image_path, prompt, threshold, plugin.manifest.model or None)
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+        except WorkerError as exc:
+            if exc.kind == "missing_dependency":
+                msg = (
+                    f"plugin '{plugin_id}' is missing dependencies in its "
+                    f"'{plugin.manifest.pyenv}' environment:\n    "
+                    + "\n    ".join(exc.missing)
+                    + "\n\nInstall with (inside that environment):  pip install "
+                    + " ".join(f'"{p}"' for p in exc.missing)
+                )
+                return ExitCode.MISSING_DEPENDENCY, None, msg
+            if exc.kind == "cache_not_populated":
+                return ExitCode.MISSING_DEPENDENCY, None, (
+                    f"plugin '{plugin_id}' needs its model downloaded first ({exc}). "
+                    f"Run `testdrive -T {plugin_id}` (or -TT {plugin_id}) once to populate the "
+                    f"cache, then re-run this command."
+                )
+            if exc.kind == "env_not_configured":
+                return ExitCode.PYENV_NOT_CONFIGURED, None, str(exc)
+            return ExitCode.INFERENCE_FAILED, None, f"plugin '{plugin_id}' (worker): {exc}"
+    else:
+        # 4. initialize plugin
+        try:
+            log.info("initializing plugin '%s' ...", plugin_id)
+            plugin.initialize()
+        except CacheNotPopulatedError as exc:
+            return (
+                ExitCode.MISSING_DEPENDENCY,
+                None,
+                (
+                    f"plugin '{plugin_id}' needs its model downloaded first ({exc}). "
+                    f"Run `testdrive -T {plugin_id}` (or -TT {plugin_id}) once to populate the "
+                    f"cache, then re-run this command."
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ExitCode.INFERENCE_FAILED, None, f"plugin '{plugin_id}' initialize() failed: {exc}"
+
+        # 5. run inference
+        try:
+            log.info("running detection: prompt=%r threshold=%.2f", prompt, threshold)
+            t0 = time.perf_counter()
+            detections = plugin.detect(image, prompt, threshold=threshold)
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+        except Exception as exc:  # noqa: BLE001
+            return ExitCode.INFERENCE_FAILED, None, f"plugin '{plugin_id}' detect() raised: {exc}"
 
     # 6. annotate + save
     matches_path, redacted_path = derive_output_paths(
@@ -908,6 +958,19 @@ def main(argv: list[str] | None = None) -> int:
     ns = parser.parse_args(argv)
     setup_logging(ns.verbose)
 
+    try:
+        return _dispatch(parser, ns)
+    finally:
+        # Guaranteed regardless of how dispatch exits (success, a
+        # returned error code, or an uncaught exception) — safe/cheap
+        # to call even if no worker was ever spawned this run (e.g.
+        # every plugin used was "framework"-pyenv, running in-process).
+        from .worker_pool import shutdown_all_workers
+
+        shutdown_all_workers()
+
+
+def _dispatch(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
     if ns.max_parallel_files is not None:
         if ns.max_parallel_files < 1:
             log.error("--max-parallel-files must be >= 1 (got %d)", ns.max_parallel_files)

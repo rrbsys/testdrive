@@ -154,13 +154,12 @@ class PluginManifest:
     #: signals they're mutually compatible with each other but not with
     #: "framework".
     #:
-    #: NOTE: as of this field's introduction, this is declarative only —
-    #: it documents intent and shows up in `-M`, but there is not yet a
-    #: mechanism that actually installs a plugin's dependencies into, or
-    #: runs its initialize()/detect() from, a separate environment. That
-    #: (necessarily subprocess-based, since two conflicting dependency
-    #: sets can't coexist in one running Python process) is tracked as
-    #: follow-up work — see the pyenv module's docstring.
+    #: NOTE: a plugin declaring a non-"framework" pyenv actually runs in
+    #: a worker subprocess using that environment's interpreter (see
+    #: worker_pool.py / worker_main.py) — not just a label. The worker
+    #: is spawned lazily on first use and kept alive for the rest of the
+    #: invocation, so a loop-mode run over many images pays that
+    #: plugin's initialize() cost once, not once per image.
     pyenv: str = "framework"
 
     @classmethod
