@@ -73,6 +73,7 @@ class ExitCode:
     IMAGE_UNREADABLE = 5
     OUTPUT_WRITE_FAILED = 6
     LOOP_PARTIAL_FAILURE = 7  # '*' loop mode: at least one plugin in the loop failed
+    PYENV_NOT_CONFIGURED = 8  # not running from cache/pyenv/framework, and it doesn't exist yet
 
 
 def setup_logging(verbosity: int) -> None:
@@ -169,9 +170,7 @@ def ensure_local_repo(repo: str, cd: Path) -> Path:
     return local_dir
 
 
-def load_processor(
-    repo: str, cd: Path, processor_class: type[Any] | None = None, **kwargs: Any
-) -> Any:
+def load_processor(repo: str, cd: Path, processor_class: type[Any] | None = None, **kwargs: Any) -> Any:
     """Robust processor loader with multiple fallbacks.
 
     Downloads the full repo into a plain local directory first (see

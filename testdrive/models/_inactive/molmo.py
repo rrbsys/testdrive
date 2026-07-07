@@ -67,6 +67,7 @@ PLUGIN = {
     ],
     "sample_prompt": "largest circle",
     "test_threshold": "default",
+    "pyenv": "framework",
 }
 
 

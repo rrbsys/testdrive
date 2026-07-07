@@ -41,6 +41,7 @@ PLUGIN = {
     ],
     "sample_prompt": "blue triangle",
     "test_threshold": "default",
+    "pyenv": "framework",
 }
 
 

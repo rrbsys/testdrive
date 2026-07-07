@@ -70,6 +70,7 @@ PLUGIN = {
     ],
     "sample_prompt": "red star",
     "test_threshold": "default",
+    "pyenv": "framework",
 }
 
 

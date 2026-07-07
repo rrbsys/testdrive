@@ -142,6 +142,27 @@ class PluginManifest:
     #: plugins, which accept arbitrary prompt text instead.
     classes: list[str] = field(default_factory=list)
 
+    #: Which named virtual environment this plugin runs in. Every
+    #: plugin shares the "framework" environment (cache/pyenv/framework)
+    #: by default — deliberately, since installing more and more
+    #: plugins' dependencies into one Python installation is a
+    #: guaranteed route to dependency hell (we've already hit this once:
+    #: a transformers upgrade pulling in a whole TensorFlow chain that
+    #: broke every other plugin). A plugin declaring its own pyenv value
+    #: (e.g. "modelx") signals it needs isolation from that shared set;
+    #: several plugins sharing a non-default name (e.g. "legacy-torch1")
+    #: signals they're mutually compatible with each other but not with
+    #: "framework".
+    #:
+    #: NOTE: as of this field's introduction, this is declarative only —
+    #: it documents intent and shows up in `-M`, but there is not yet a
+    #: mechanism that actually installs a plugin's dependencies into, or
+    #: runs its initialize()/detect() from, a separate environment. That
+    #: (necessarily subprocess-based, since two conflicting dependency
+    #: sets can't coexist in one running Python process) is tracked as
+    #: follow-up work — see the pyenv module's docstring.
+    pyenv: str = "framework"
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PluginManifest":
         if "id" not in data:

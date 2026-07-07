@@ -196,6 +196,7 @@ def _print_manifest_text(m: PluginManifest) -> None:
         print(f"HF Repository  : {m.hf_repo}")
     if m.task:
         print(f"Task           : {m.task}")
+    print(f"Pyenv          : {m.pyenv}")
     print()
     if m.supports:
         print("Supports")
@@ -745,10 +746,7 @@ def _resolve_test_threshold(plugin_id: str, cli_threshold: float | None) -> floa
 
 
 def _run_example_test_one(
-    plugin_id: str,
-    threshold: float | None,
-    output_dir: Path,
-    model_override: str | None = None,
+    plugin_id: str, threshold: float | None, output_dir: Path, model_override: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Run one plugin's example test. Returns ``(exit_code, info)`` where
     ``info`` has enough detail for both text and ``--json`` presentation.
@@ -836,9 +834,7 @@ def cmd_example_test(
     last_exit_code = ExitCode.SUCCESS
 
     for i, plugin_id in enumerate(plugin_ids):
-        exit_code, info = _run_example_test_one(
-            plugin_id, threshold, out_dir, model_override=model_override
-        )
+        exit_code, info = _run_example_test_one(plugin_id, threshold, out_dir, model_override=model_override)
         last_exit_code = exit_code
         if info.get("passed"):
             n_passed += 1
@@ -929,9 +925,7 @@ def main(argv: list[str] | None = None) -> int:
     if ns.example_test:
         set_downloads_allowed(True)  # -TT explicitly populates the cache
         output_dir = Path(ns.output_dir) if ns.output_dir else None
-        return cmd_example_test(
-            ns.example_test, ns.json, ns.threshold, output_dir, model_override=ns.model
-        )
+        return cmd_example_test(ns.example_test, ns.json, ns.threshold, output_dir, model_override=ns.model)
     if ns.selftest:
         set_downloads_allowed(True)  # -T explicitly populates the cache
         if ns.selftest == LOOP_ALL:
@@ -969,5 +963,24 @@ def main(argv: list[str] | None = None) -> int:
     return ExitCode.CLI_ERROR
 
 
+def entrypoint() -> int:
+    """Real CLI entry point (installed ``testdrive`` command, and
+    ``python -m testdrive``) — enforces the framework-environment guard
+    (see ``pyenv.ensure_framework_env``) before doing anything else,
+    then behaves exactly like ``main()``.
+
+    Deliberately separate from ``main()``: the test suite calls
+    ``main()`` directly so it's never subject to the environment guard
+    (tests shouldn't need a real ``cache/pyenv/framework`` to run), and
+    that's also why ``pyroject.toml``'s console script and
+    ``__main__.py`` both point at this function instead of ``main``.
+    """
+    from .cache import cache_dir
+    from .pyenv import ensure_framework_env
+
+    ensure_framework_env(cache_dir())
+    return main()
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(entrypoint())

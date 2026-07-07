@@ -62,6 +62,7 @@ PLUGIN = {
     ],
     "sample_prompt": "purple pentagon",
     "test_threshold": "default",
+    "pyenv": "framework",
 }
 
 

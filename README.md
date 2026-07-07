@@ -39,6 +39,35 @@ discovered by the framework, so they don't appear in `-L`/`-I`/etc):
   full reasoning — both are kept, not deleted, in case your hardware
   (or a future transformers/molmo release) changes the calculus.
 
+## The framework's own environment
+
+testdrive insists on running from one dedicated virtual environment,
+`cache/pyenv/framework` — not because of a preference, but as a
+deliberate guard against dependency hell as more plugins accumulate
+(this project already hit that once for real: a `transformers` upgrade
+pulling in a TensorFlow chain that broke every plugin at once). If
+you start testdrive from anywhere else, it transparently relaunches
+itself from that environment if it already exists, or — on a fresh
+checkout, before that environment exists yet — stops and tells you
+exactly how to create it:
+
+```bash
+python3.12 -m venv cache/pyenv/framework            # py -3.12 ... ...\...\... on Windows
+cache/pyenv/framework/bin/pip install -e .          # cache\...\Scripts\pip.exe on Windows
+source cache/pyenv/framework/bin/activate           # cache\...\Scripts\activate on Windows
+```
+
+After that one-time setup, just run `testdrive` normally — the
+self-relaunch is invisible from then on. (Set
+`TESTDRIVE_SKIP_PYENV_CHECK=1` to bypass this entirely; used by CI's
+core-only smoke test, not intended for normal use.)
+
+Each plugin's manifest also carries a `pyenv` field (`-M <plugin>`),
+currently always `"framework"` — the mechanism for a plugin to
+actually get its own isolated environment (for a dependency set that's
+incompatible with everything else) is tracked as follow-up work, not
+built yet. See `testdrive/pyenv.py`'s module docstring for the reasoning.
+
 ## Installation
 
 ```bash

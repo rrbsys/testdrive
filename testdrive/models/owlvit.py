@@ -37,6 +37,7 @@ PLUGIN = {
     ],
     "sample_prompt": "orange square",
     "test_threshold": "0.05",
+    "pyenv": "framework",
 }
 
 
