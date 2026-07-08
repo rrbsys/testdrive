@@ -7,6 +7,15 @@ kept alive for the rest of this testdrive invocation — so a loop-mode
 run over many images pays a plugin's initialize() cost once, not once
 per image. Call ``shutdown_all_workers()`` when the CLI invocation is
 done (``cli.main()`` does this in a ``finally`` block).
+
+Unlike the framework's own environment (which needs one-time manual
+setup — see ``pyenv.py`` — since there's no environment yet to
+automate anything from), a plugin's own environment is provisioned
+automatically the first time it's needed, gated behind the same
+``set_downloads_allowed``/``-T``/``-TT`` discipline as model weight
+downloads (see ``_provision_plugin_env`` below): pip-installing a
+plugin's dependencies is the same class of "don't do this by surprise
+during a plain detect run" action as downloading multi-GB weights.
 """
 
 from __future__ import annotations
@@ -37,6 +46,65 @@ class WorkerError(Exception):
         self.kind = kind
         self.missing = missing or []
         super().__init__(message)
+
+
+def _project_root() -> Path:
+    """The directory containing pyproject.toml — this file's grandparent
+    (testdrive/worker_pool.py -> testdrive/ -> project root).
+    """
+    return Path(__file__).resolve().parent.parent
+
+
+def _provision_plugin_env(plugin_id: str, pyenv_name: str, env_directory: Path, python_path: Path) -> None:
+    """Automatically create and set up a plugin's own environment.
+
+    Unlike the framework's own environment (which the user must set up
+    by hand — see pyenv.py — because there's no environment yet to run
+    any automation *from*), a plugin's private environment can safely
+    be provisioned by code already running from the verified-working
+    framework environment: create the venv with the framework's own
+    interpreter (already confirmed to be a working, correct-version
+    Python — see pyenv.ensure_framework_env), then pip install testdrive
+    itself plus this plugin's extra into it. No manual `python -m venv`
+    / `pip install` steps for the user, unlike the framework env.
+
+    Raises WorkerError (kind="error") on any failure, wrapping
+    whatever subprocess.CalledProcessError/OSError occurred so callers
+    don't need to know this is implemented via subprocess.
+    """
+    import subprocess
+    import sys
+
+    log.info("setting up '%s' environment for plugin '%s' (first use)...", pyenv_name, plugin_id)
+    try:
+        log.info("  creating venv at %s ...", env_directory)
+        subprocess.run(
+            [sys.executable, "-m", "venv", str(env_directory)],
+            check=True, capture_output=True, text=True,
+        )
+
+        project_root = _project_root()
+        log.info("  installing testdrive + '%s' extra (this may take a while)...", plugin_id)
+        subprocess.run(
+            [
+                str(python_path), "-m", "pip", "install",
+                "-e", str(project_root),
+                "-e", f"{project_root}[{plugin_id}]",
+            ],
+            check=True, capture_output=True, text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise WorkerError(
+            "error",
+            f"could not set up '{pyenv_name}' environment for plugin '{plugin_id}': "
+            f"{exc.cmd} exited {exc.returncode}\n{exc.stderr}",
+        ) from exc
+    except OSError as exc:
+        raise WorkerError(
+            "error", f"could not set up '{pyenv_name}' environment for plugin '{plugin_id}': {exc}",
+        ) from exc
+
+    log.info("'%s' environment ready", pyenv_name)
 
 
 class WorkerHandle:
@@ -122,19 +190,30 @@ class WorkerPool:
 
     def get(self, plugin_id: str, pyenv_name: str, cd: Path) -> WorkerHandle:
         if plugin_id not in self._workers:
-            from .pyenv import env_python_path
+            from .pyenv import env_dir, env_python_path
+            from .util import get_downloads_allowed
 
             python_path = env_python_path(cd, pyenv_name)
             if not python_path.exists():
-                env_dir = python_path.parent.parent
-                raise WorkerError(
-                    "env_not_configured",
-                    f"plugin '{plugin_id}' needs the '{pyenv_name}' environment "
-                    f"(expected interpreter: {python_path}), which doesn't exist yet.\n"
-                    f"Create it with:\n"
-                    f'    python3.12 -m venv "{env_dir}"\n'
-                    f'    "{python_path}" -m pip install -e . -e ".[{plugin_id}]"',
-                )
+                if not get_downloads_allowed():
+                    # Mirrors the "run -T/-TT first" cache-discipline
+                    # message used for model weights: setting up a new
+                    # venv + pip installing into it is the same class of
+                    # "don't do this by surprise during a plain detect
+                    # run" action.
+                    raise WorkerError(
+                        "env_not_configured",
+                        f"plugin '{plugin_id}' needs its '{pyenv_name}' environment set up "
+                        f"first. Run `testdrive -T {plugin_id}` (or -TT {plugin_id}) once to "
+                        f"set it up automatically, then re-run this command.",
+                    )
+                _provision_plugin_env(plugin_id, pyenv_name, env_dir(cd, pyenv_name), python_path)
+                if not python_path.exists():  # pragma: no cover — defensive
+                    raise WorkerError(
+                        "error",
+                        f"set up '{pyenv_name}' for plugin '{plugin_id}' but the expected "
+                        f"interpreter still isn't there ({python_path})",
+                    )
             self._workers[plugin_id] = WorkerHandle(plugin_id, python_path)
         return self._workers[plugin_id]
 

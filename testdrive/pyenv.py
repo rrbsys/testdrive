@@ -45,8 +45,28 @@ FRAMEWORK_ENV_NAME = "framework"
 
 
 def env_dir(cd: Path, name: str = FRAMEWORK_ENV_NAME) -> Path:
-    """Return ``cache/pyenv/<name>`` (not guaranteed to exist)."""
-    return cd / "pyenv" / name
+    """Return ``cache/pyenv/<platform>/<name>`` (not guaranteed to exist).
+
+    Keyed by ``sys.platform`` because a venv is never portable across
+    operating systems (different interpreter binary, different
+    site-packages layout, compiled extensions built for the wrong OS,
+    …) — sharing one ``cache/`` directory between, say, a Windows
+    machine and a macOS one (a real scenario here: this project's cache
+    has been used from both native Windows and Wine on macOS) would
+    otherwise mean one platform's venv silently gets treated as if it
+    were usable on the other.
+    """
+    return cd / "pyenv" / sys.platform / name
+
+
+def recommended_python() -> str:
+    """The python command this platform's setup instructions recommend.
+
+    3.11 on macOS, 3.12 elsewhere — as of this writing, some of this
+    project's heavier dependencies lag behind on macOS/3.12 wheel
+    availability, so 3.11 is the safer default there specifically.
+    """
+    return "python3.11" if sys.platform == "darwin" else "python3.12"
 
 
 def env_python_path(cd: Path, name: str = FRAMEWORK_ENV_NAME) -> Path:
@@ -84,16 +104,29 @@ def is_in_env(cd: Path, name: str = FRAMEWORK_ENV_NAME) -> bool:
 def _relaunch_instructions(cd: Path) -> str:
     py = env_python_path(cd)
     env = env_dir(cd)
+    version = recommended_python()
+
     if os.name == "nt":
-        create = f'py -3.12 -m venv "{env}"\n    "{py}" -m pip install -e .'
+        venv_cmd = f'py -{version.removeprefix("python")} -m venv "{env}"'
     else:
-        create = f'python3.12 -m venv "{env}"\n    "{py}" -m pip install -e .'
+        venv_cmd = f'{version} -m venv "{env}"'
+
     return (
         "testdrive isn't running from its dedicated environment.\n\n"
         f"Expected interpreter:\n    {py}\n\n"
-        "That environment doesn't exist yet. Create it once with a working\n"
-        "Python 3.12 (recommended) or newer:\n\n"
-        f"    {create}\n\n"
+        "That environment doesn't exist yet. Set it up once (3 steps —\n"
+        "skip step 1 if you've already got `testdrive` running some other\n"
+        "way, e.g. you're seeing this message at all):\n\n"
+        "    1) pip install -e .\n"
+        "       (into whatever Python you're using right now — this is what\n"
+        "       makes the `testdrive` command exist at all; without it,\n"
+        "       there's nothing to relaunch from cache/pyenv/... in the first\n"
+        "       place, on a fresh checkout or a fresh shell)\n\n"
+        f"    2) {venv_cmd}\n"
+        "       (the dedicated environment itself)\n\n"
+        f'    3) "{py.parent / ("pip.exe" if os.name == "nt" else "pip")}" install -e .\n'
+        "       (testdrive again, this time INTO that dedicated environment —\n"
+        "       step 1 alone does not do this, they're two separate installs)\n\n"
         "Then just re-run the same testdrive command — it will automatically\n"
         "relaunch itself from that environment from now on."
     )
@@ -134,7 +167,7 @@ def ensure_framework_env(cd: Path) -> None:
             f"[testdrive] relaunched via {env_python_path(cd)} but still not running "
             "from the expected environment afterward. That path may not be a valid "
             "virtual environment (e.g. missing pyvenv.cfg) — recreate it with:\n\n"
-            f"    python3.12 -m venv \"{env_dir(cd)}\"\n",
+            f'    {recommended_python()} -m venv "{env_dir(cd)}"\n',
             file=sys.stderr,
         )
         sys.exit(ExitCode.PYENV_NOT_CONFIGURED)
