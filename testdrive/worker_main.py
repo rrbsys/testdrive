@@ -15,11 +15,21 @@ is ever written to stdout, so the pipe can't get corrupted by stray
 prints):
 
     parent -> worker
+        {"cmd": "init", "model": str | null}
         {"cmd": "detect", "image_path": str, "prompt": str,
          "threshold": float, "model": str | null}
         {"cmd": "shutdown"}
 
-    worker -> parent (exactly one line per "detect" request)
+    worker -> parent
+        # response to "init" (also implicitly run before the first
+        # "detect", if not already done — so a plain detect-only caller
+        # never needs to send "init" separately)
+        {"ok": true}
+        {"ok": false, "kind": "missing_dependency", "missing": [str, ...]}
+        {"ok": false, "kind": "cache_not_populated", "message": str}
+        {"ok": false, "kind": "error", "message": str}
+
+        # response to "detect" (one line per request)
         {"ok": true, "detections": [{"label": str, "score": float,
                                       "bbox": [int, int, int, int]}, ...]}
         {"ok": false, "kind": "missing_dependency", "missing": [str, ...]}
@@ -112,6 +122,34 @@ def main(argv: list[str]) -> int:
     initialized = False
     init_error: dict[str, Any] | None = None
 
+    def ensure_initialized(model: str | None) -> dict[str, Any] | None:
+        """Run the model-override + dependency-check + initialize()
+        sequence exactly once per worker lifetime; every later call
+        (from either "init" or "detect" requests) is a cheap no-op that
+        just returns whatever happened the first time. Returns an error
+        dict on failure, None on success.
+        """
+        nonlocal initialized, init_error
+        if initialized or init_error is not None:
+            return init_error
+
+        try:
+            if model:
+                plugin.set_model_override(model)
+
+            installed, missing = plugin.is_installed()
+            if not installed:
+                init_error = {"ok": False, "kind": "missing_dependency", "missing": missing}
+            else:
+                plugin.initialize()
+                initialized = True
+        except CacheNotPopulatedError as exc:
+            init_error = {"ok": False, "kind": "cache_not_populated", "message": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            init_error = {"ok": False, "kind": "error", "message": f"initialize() failed: {exc}"}
+
+        return init_error
+
     for raw_line in sys.stdin:
         raw_line = raw_line.strip()
         if not raw_line:
@@ -126,45 +164,33 @@ def main(argv: list[str]) -> int:
         cmd = request.get("cmd")
         if cmd == "shutdown":
             break
+
+        if cmd == "init":
+            error = ensure_initialized(request.get("model"))
+            _respond(error if error is not None else {"ok": True})
+            continue
+
         if cmd != "detect":
             _respond({"ok": False, "kind": "error", "message": f"unknown command: {cmd!r}"})
             continue
 
-        # Model override + initialize() happen once, on the first
-        # "detect" request this worker ever handles — every later
-        # request just reuses the same already-initialized plugin
-        # instance (the whole point of keeping this process alive).
-        if not initialized and init_error is None:
-            try:
-                model = request.get("model")
-                if model:
-                    plugin.set_model_override(model)
-
-                installed, missing = plugin.is_installed()
-                if not installed:
-                    init_error = {"ok": False, "kind": "missing_dependency", "missing": missing}
-                else:
-                    plugin.initialize()
-                    initialized = True
-            except CacheNotPopulatedError as exc:
-                init_error = {"ok": False, "kind": "cache_not_populated", "message": str(exc)}
-            except Exception as exc:  # noqa: BLE001
-                init_error = {"ok": False, "kind": "error", "message": f"initialize() failed: {exc}"}
-
-        if init_error is not None:
-            _respond(init_error)
+        error = ensure_initialized(request.get("model"))
+        if error is not None:
+            _respond(error)
             continue
 
         try:
             image = load_image(Path(request["image_path"]))
             detections = plugin.detect(image, request["prompt"], threshold=request["threshold"])
-            _respond({
-                "ok": True,
-                "detections": [
-                    {"label": d.label, "score": d.score, "bbox": list(d.bbox)}
-                    for d in detections
-                ],
-            })
+            _respond(
+                {
+                    "ok": True,
+                    "detections": [
+                        {"label": d.label, "score": d.score, "bbox": list(d.bbox)}
+                        for d in detections
+                    ],
+                }
+            )
         except Exception as exc:  # noqa: BLE001
             _respond({"ok": False, "kind": "error", "message": f"detect() raised: {exc}"})
 

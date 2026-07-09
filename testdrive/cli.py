@@ -50,6 +50,7 @@ from .util import (
     setup_logging,
     set_max_parallel_files,
     set_downloads_allowed,
+    set_auto_provision_enabled,
     CacheNotPopulatedError,
 )
 
@@ -137,6 +138,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="override a plugin's default model variant, for plugins that declare more "
         "than one (see manifest 'models', e.g. yolo11n/s/m/l/x). No effect on plugins "
         "with a single fixed model.",
+    )
+    parser.add_argument(
+        "--no-auto-provision",
+        action="store_true",
+        help="for plugins with their own environment (manifest 'pyenv' != \"framework\"): "
+        "don't automatically create/pip-install it on first -T/-TT use — set it up by "
+        'hand instead. No effect on plugins using the default "framework" environment.',
     )
 
     parser.add_argument("plugin", nargs="?", help="plugin id, e.g. owlv2 ('*' = all plugins)")
@@ -359,6 +367,8 @@ def cmd_selftest(plugin_id: str, as_json: bool, model_override: str | None = Non
         return ExitCode.SUCCESS
     elif result.failures and "missing" in result.failures[0]:
         return ExitCode.MISSING_DEPENDENCY
+    elif result.failures and "environment set up" in result.failures[0]:
+        return ExitCode.PYENV_NOT_CONFIGURED
     elif "load plugin" in (result.steps[0] if result.steps else ""):
         return ExitCode.PLUGIN_NOT_FOUND
     else:
@@ -499,7 +509,9 @@ def _run_detect_one(
             worker = get_pool().get(plugin_id, plugin.manifest.pyenv, cache_dir())
             log.info(
                 "running detection via '%s' worker: prompt=%r threshold=%.2f",
-                plugin.manifest.pyenv, prompt, threshold,
+                plugin.manifest.pyenv,
+                prompt,
+                threshold,
             )
             t0 = time.perf_counter()
             detections = worker.detect(image_path, prompt, threshold, plugin.manifest.model or None)
@@ -515,10 +527,14 @@ def _run_detect_one(
                 )
                 return ExitCode.MISSING_DEPENDENCY, None, msg
             if exc.kind == "cache_not_populated":
-                return ExitCode.MISSING_DEPENDENCY, None, (
-                    f"plugin '{plugin_id}' needs its model downloaded first ({exc}). "
-                    f"Run `testdrive -T {plugin_id}` (or -TT {plugin_id}) once to populate the "
-                    f"cache, then re-run this command."
+                return (
+                    ExitCode.MISSING_DEPENDENCY,
+                    None,
+                    (
+                        f"plugin '{plugin_id}' needs its model downloaded first ({exc}). "
+                        f"Run `testdrive -T {plugin_id}` (or -TT {plugin_id}) once to populate the "
+                        f"cache, then re-run this command."
+                    ),
                 )
             if exc.kind == "env_not_configured":
                 return ExitCode.PYENV_NOT_CONFIGURED, None, str(exc)
@@ -539,7 +555,11 @@ def _run_detect_one(
                 ),
             )
         except Exception as exc:  # noqa: BLE001
-            return ExitCode.INFERENCE_FAILED, None, f"plugin '{plugin_id}' initialize() failed: {exc}"
+            return (
+                ExitCode.INFERENCE_FAILED,
+                None,
+                f"plugin '{plugin_id}' initialize() failed: {exc}",
+            )
 
         # 5. run inference
         try:
@@ -796,7 +816,10 @@ def _resolve_test_threshold(plugin_id: str, cli_threshold: float | None) -> floa
 
 
 def _run_example_test_one(
-    plugin_id: str, threshold: float | None, output_dir: Path, model_override: str | None = None,
+    plugin_id: str,
+    threshold: float | None,
+    output_dir: Path,
+    model_override: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Run one plugin's example test. Returns ``(exit_code, info)`` where
     ``info`` has enough detail for both text and ``--json`` presentation.
@@ -884,7 +907,9 @@ def cmd_example_test(
     last_exit_code = ExitCode.SUCCESS
 
     for i, plugin_id in enumerate(plugin_ids):
-        exit_code, info = _run_example_test_one(plugin_id, threshold, out_dir, model_override=model_override)
+        exit_code, info = _run_example_test_one(
+            plugin_id, threshold, out_dir, model_override=model_override
+        )
         last_exit_code = exit_code
         if info.get("passed"):
             n_passed += 1
@@ -977,6 +1002,8 @@ def _dispatch(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
             return ExitCode.CLI_ERROR
         set_max_parallel_files(ns.max_parallel_files)
 
+    set_auto_provision_enabled(not ns.no_auto_provision)
+
     if ns.list:
         return cmd_list(ns.json)
     if ns.manifest:
@@ -988,7 +1015,9 @@ def _dispatch(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
     if ns.example_test:
         set_downloads_allowed(True)  # -TT explicitly populates the cache
         output_dir = Path(ns.output_dir) if ns.output_dir else None
-        return cmd_example_test(ns.example_test, ns.json, ns.threshold, output_dir, model_override=ns.model)
+        return cmd_example_test(
+            ns.example_test, ns.json, ns.threshold, output_dir, model_override=ns.model
+        )
     if ns.selftest:
         set_downloads_allowed(True)  # -T explicitly populates the cache
         if ns.selftest == LOOP_ALL:

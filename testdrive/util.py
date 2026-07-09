@@ -81,6 +81,35 @@ def get_max_parallel_files() -> int | None:
     return _max_parallel_files
 
 
+# Set via --no-auto-provision on the CLI (see set_auto_provision_enabled
+# below). Defaults to True so library/test usage isn't restricted unless
+# a caller opts out.
+_auto_provision_enabled: bool = True
+
+
+def set_auto_provision_enabled(enabled: bool) -> None:
+    """Control whether a plugin's own (non-"framework") pyenv may be
+    automatically created and pip-installed into on first use.
+
+    Defaults to True. Pass False (``--no-auto-provision`` on the CLI)
+    to require the person to set that environment up by hand instead —
+    e.g. because they want control over exactly what gets installed, or
+    because auto-provisioning failed/misbehaved and they're debugging it
+    manually. Only relevant to plugins that declare a pyenv other than
+    "framework"; has no effect otherwise. Also gated behind
+    get_downloads_allowed() regardless of this setting — provisioning a
+    new environment is the same class of "don't do this by surprise
+    during a plain detect run" action as downloading model weights.
+    """
+    global _auto_provision_enabled
+    _auto_provision_enabled = enabled
+
+
+def get_auto_provision_enabled() -> bool:
+    """Current value set by set_auto_provision_enabled() (default True)."""
+    return _auto_provision_enabled
+
+
 class ExitCode:
     """Process exit codes, documented so testdrive scripts/CI nicely."""
 
@@ -189,7 +218,9 @@ def ensure_local_repo(repo: str, cd: Path) -> Path:
     return local_dir
 
 
-def load_processor(repo: str, cd: Path, processor_class: type[Any] | None = None, **kwargs: Any) -> Any:
+def load_processor(
+    repo: str, cd: Path, processor_class: type[Any] | None = None, **kwargs: Any
+) -> Any:
     """Robust processor loader with multiple fallbacks.
 
     Downloads the full repo into a plain local directory first (see

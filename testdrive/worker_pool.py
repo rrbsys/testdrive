@@ -55,7 +55,13 @@ def _project_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def _provision_plugin_env(plugin_id: str, pyenv_name: str, env_directory: Path, python_path: Path) -> None:
+def _provision_marker_path(env_directory: Path) -> Path:
+    return env_directory / ".testdrive_plugin_ok"
+
+
+def _provision_plugin_env(
+    plugin_id: str, pyenv_name: str, env_directory: Path, python_path: Path
+) -> None:
     """Automatically create and set up a plugin's own environment.
 
     Unlike the framework's own environment (which the user must set up
@@ -67,6 +73,13 @@ def _provision_plugin_env(plugin_id: str, pyenv_name: str, env_directory: Path, 
     Python — see pyenv.ensure_framework_env), then pip install testdrive
     itself plus this plugin's extra into it. No manual `python -m venv`
     / `pip install` steps for the user, unlike the framework env.
+
+    Writes a small marker file (see _provision_marker_path) on success —
+    not a precondition for the environment being considered usable
+    (WorkerPool.get() still trusts any environment with the expected
+    interpreter present, including ones set up by hand, exactly as
+    before), just a breadcrumb recording that our own automation
+    completed here specifically, for diagnostics.
 
     Raises WorkerError (kind="error") on any failure, wrapping
     whatever subprocess.CalledProcessError/OSError occurred so callers
@@ -80,18 +93,27 @@ def _provision_plugin_env(plugin_id: str, pyenv_name: str, env_directory: Path, 
         log.info("  creating venv at %s ...", env_directory)
         subprocess.run(
             [sys.executable, "-m", "venv", str(env_directory)],
-            check=True, capture_output=True, text=True,
+            check=True,
+            capture_output=True,
+            text=True,
         )
 
         project_root = _project_root()
         log.info("  installing testdrive + '%s' extra (this may take a while)...", plugin_id)
         subprocess.run(
             [
-                str(python_path), "-m", "pip", "install",
-                "-e", str(project_root),
-                "-e", f"{project_root}[{plugin_id}]",
+                str(python_path),
+                "-m",
+                "pip",
+                "install",
+                "-e",
+                str(project_root),
+                "-e",
+                f"{project_root}[{plugin_id}]",
             ],
-            check=True, capture_output=True, text=True,
+            check=True,
+            capture_output=True,
+            text=True,
         )
     except subprocess.CalledProcessError as exc:
         raise WorkerError(
@@ -101,8 +123,14 @@ def _provision_plugin_env(plugin_id: str, pyenv_name: str, env_directory: Path, 
         ) from exc
     except OSError as exc:
         raise WorkerError(
-            "error", f"could not set up '{pyenv_name}' environment for plugin '{plugin_id}': {exc}",
+            "error",
+            f"could not set up '{pyenv_name}' environment for plugin '{plugin_id}': {exc}",
         ) from exc
+
+    try:
+        _provision_marker_path(env_directory).write_text(f"{plugin_id}\n")
+    except OSError:
+        pass  # purely a diagnostic breadcrumb — not worth failing over
 
     log.info("'%s' environment ready", pyenv_name)
 
@@ -118,7 +146,9 @@ class WorkerHandle:
         env = os.environ.copy()
         env["TESTDRIVE_WORKER_DOWNLOADS_ALLOWED"] = "1" if get_downloads_allowed() else "0"
         max_parallel = get_max_parallel_files()
-        env["TESTDRIVE_WORKER_MAX_PARALLEL_FILES"] = str(max_parallel) if max_parallel is not None else ""
+        env["TESTDRIVE_WORKER_MAX_PARALLEL_FILES"] = (
+            str(max_parallel) if max_parallel is not None else ""
+        )
 
         self._proc = subprocess.Popen(
             [str(python_path), "-m", "testdrive.worker_main", plugin_id],
@@ -130,8 +160,46 @@ class WorkerHandle:
             env=env,
         )
 
+    def init(self, model: str | None) -> None:
+        """Explicitly run the worker's dependency-check + initialize()
+        sequence, without also running a detection. Used by callers
+        (self-test) that report initialize() as its own timed step,
+        separate from detect() — a plain detect() call also runs this
+        implicitly on its first request, so callers that don't care
+        about that distinction can just call detect() directly.
+        """
+        if self._proc.stdin is None or self._proc.stdout is None:  # pragma: no cover
+            raise WorkerError("error", f"worker for '{self.plugin_id}' has no stdin/stdout pipes")
+
+        request = {"cmd": "init", "model": model}
+        try:
+            self._proc.stdin.write(json.dumps(request) + "\n")
+            self._proc.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            raise WorkerError(
+                "error", f"worker for '{self.plugin_id}' is no longer running: {exc}"
+            ) from exc
+
+        line = self._proc.stdout.readline()
+        if not line:
+            raise WorkerError("error", f"worker for '{self.plugin_id}' exited unexpectedly")
+
+        response = json.loads(line)
+        if response.get("ok"):
+            return
+
+        raise WorkerError(
+            response.get("kind", "error"),
+            response.get("message", "unknown worker error"),
+            missing=response.get("missing"),
+        )
+
     def detect(
-        self, image_path: Path, prompt: str, threshold: float, model: str | None,
+        self,
+        image_path: Path,
+        prompt: str,
+        threshold: float,
+        model: str | None,
     ) -> list["Detection"]:
         from .detection import Detection
 
@@ -149,7 +217,9 @@ class WorkerHandle:
             self._proc.stdin.write(json.dumps(request) + "\n")
             self._proc.stdin.flush()
         except (BrokenPipeError, OSError) as exc:
-            raise WorkerError("error", f"worker for '{self.plugin_id}' is no longer running: {exc}") from exc
+            raise WorkerError(
+                "error", f"worker for '{self.plugin_id}' is no longer running: {exc}"
+            ) from exc
 
         line = self._proc.stdout.readline()
         if not line:
@@ -191,7 +261,7 @@ class WorkerPool:
     def get(self, plugin_id: str, pyenv_name: str, cd: Path) -> WorkerHandle:
         if plugin_id not in self._workers:
             from .pyenv import env_dir, env_python_path
-            from .util import get_downloads_allowed
+            from .util import get_auto_provision_enabled, get_downloads_allowed
 
             python_path = env_python_path(cd, pyenv_name)
             if not python_path.exists():
@@ -206,6 +276,17 @@ class WorkerPool:
                         f"plugin '{plugin_id}' needs its '{pyenv_name}' environment set up "
                         f"first. Run `testdrive -T {plugin_id}` (or -TT {plugin_id}) once to "
                         f"set it up automatically, then re-run this command.",
+                    )
+                if not get_auto_provision_enabled():
+                    # --no-auto-provision: set up by hand instead, same
+                    # instructions the framework's own environment needs.
+                    env_directory = env_dir(cd, pyenv_name)
+                    raise WorkerError(
+                        "env_not_configured",
+                        f"plugin '{plugin_id}' needs its '{pyenv_name}' environment set up, "
+                        f"but --no-auto-provision was given. Set it up by hand:\n"
+                        f'    python3 -m venv "{env_directory}"\n'
+                        f'    "{python_path}" -m pip install -e . -e ".[{plugin_id}]"',
                     )
                 _provision_plugin_env(plugin_id, pyenv_name, env_dir(cd, pyenv_name), python_path)
                 if not python_path.exists():  # pragma: no cover — defensive

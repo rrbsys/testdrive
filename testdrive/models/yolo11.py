@@ -38,18 +38,86 @@ PLUGIN_API = 1
 # here so `-M yolo11` can show it without downloading or importing
 # anything.
 _COCO_80_CLASSES = [
-    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck",
-    "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench",
-    "bird", "cat", "dog", "horse", "sheep", "cow", "elephant", "bear", "zebra",
-    "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
-    "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove",
-    "skateboard", "surfboard", "tennis racket", "bottle", "wine glass", "cup",
-    "fork", "knife", "spoon", "bowl", "banana", "apple", "sandwich", "orange",
-    "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
-    "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse",
-    "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink",
-    "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
-    "hair drier", "toothbrush",
+    "person",
+    "bicycle",
+    "car",
+    "motorcycle",
+    "airplane",
+    "bus",
+    "train",
+    "truck",
+    "boat",
+    "traffic light",
+    "fire hydrant",
+    "stop sign",
+    "parking meter",
+    "bench",
+    "bird",
+    "cat",
+    "dog",
+    "horse",
+    "sheep",
+    "cow",
+    "elephant",
+    "bear",
+    "zebra",
+    "giraffe",
+    "backpack",
+    "umbrella",
+    "handbag",
+    "tie",
+    "suitcase",
+    "frisbee",
+    "skis",
+    "snowboard",
+    "sports ball",
+    "kite",
+    "baseball bat",
+    "baseball glove",
+    "skateboard",
+    "surfboard",
+    "tennis racket",
+    "bottle",
+    "wine glass",
+    "cup",
+    "fork",
+    "knife",
+    "spoon",
+    "bowl",
+    "banana",
+    "apple",
+    "sandwich",
+    "orange",
+    "broccoli",
+    "carrot",
+    "hot dog",
+    "pizza",
+    "donut",
+    "cake",
+    "chair",
+    "couch",
+    "potted plant",
+    "bed",
+    "dining table",
+    "toilet",
+    "tv",
+    "laptop",
+    "mouse",
+    "remote",
+    "keyboard",
+    "cell phone",
+    "microwave",
+    "oven",
+    "toaster",
+    "sink",
+    "refrigerator",
+    "book",
+    "clock",
+    "vase",
+    "scissors",
+    "teddy bear",
+    "hair drier",
+    "toothbrush",
 ]
 assert len(_COCO_80_CLASSES) == 80
 
@@ -112,9 +180,13 @@ class Plugin(DetectorPlugin):
         # to use one of them) — download_file() fetches exactly the one
         # checkpoint requested, still through the same cache-discipline
         # gate (set_downloads_allowed) as every other plugin.
-        checkpoint_url = f"https://huggingface.co/{self.manifest.hf_repo}/resolve/main/{model_name}.pt"
+        checkpoint_url = (
+            f"https://huggingface.co/{self.manifest.hf_repo}/resolve/main/{model_name}.pt"
+        )
         checkpoint = download_file(
-            checkpoint_url, cd / "checkpoints" / "yolo11", filename=f"{model_name}.pt",
+            checkpoint_url,
+            cd / "checkpoints" / "yolo11",
+            filename=f"{model_name}.pt",
         )
 
         log.info("loading YOLO11 (%s)...", model_name)
@@ -126,7 +198,9 @@ class Plugin(DetectorPlugin):
         self._initialized = True
         log.info("YOLO11 (%s) ready", model_name)
 
-    def detect(self, image: "PILImage.Image", prompt: str, threshold: float = 0.3) -> list[Detection]:
+    def detect(
+        self, image: "PILImage.Image", prompt: str, threshold: float = 0.3
+    ) -> list[Detection]:
         """Detect objects among YOLO11's fixed 80 COCO classes.
 
         ``prompt`` is a comma-separated allow-list of class names to
@@ -163,11 +237,13 @@ class Plugin(DetectorPlugin):
                     continue
                 score = float(box.conf[0])
                 x1, y1, x2, y2 = box.xyxy[0].tolist()
-                detections.append(Detection(
-                    label=label,
-                    score=score,
-                    bbox=(int(x1), int(y1), int(x2), int(y2)),
-                ))
+                detections.append(
+                    Detection(
+                        label=label,
+                        score=score,
+                        bbox=(int(x1), int(y1), int(x2), int(y2)),
+                    )
+                )
 
         log.debug("detect: %d detection(s) above threshold %.2f", len(detections), threshold)
         return detections
