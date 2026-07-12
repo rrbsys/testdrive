@@ -70,9 +70,17 @@ def _provision_plugin_env(
     be provisioned by code already running from the verified-working
     framework environment: create the venv with the framework's own
     interpreter (already confirmed to be a working, correct-version
-    Python — see pyenv.ensure_framework_env), then pip install testdrive
-    itself plus this plugin's extra into it. No manual `python -m venv`
-    / `pip install` steps for the user, unlike the framework env.
+    Python — see pyenv.ensure_framework_env), optionally upgrade pip in
+    it (see get_pyenv_pip_upgrade — on by default; an old bundled pip is
+    a common, confusing source of install failures), then pip install
+    testdrive itself plus this plugin's extra into it. No manual
+    `python -m venv` / `pip install` steps for the user, unlike the
+    framework env.
+
+    Progress is printed unconditionally (not gated behind -v/log level)
+    — this can take a genuinely long time (multi-GB dependencies like
+    torch), and printing nothing in the meantime reads as a hang rather
+    than "working on it".
 
     Writes a small marker file (see _provision_marker_path) on success —
     not a precondition for the environment being considered usable
@@ -88,9 +96,14 @@ def _provision_plugin_env(
     import subprocess
     import sys
 
-    log.info("setting up '%s' environment for plugin '%s' (first use)...", pyenv_name, plugin_id)
+    from .util import get_pyenv_pip_upgrade
+
+    def _announce(msg: str) -> None:
+        print(f"[testdrive] {msg}", file=sys.stderr)
+
+    _announce(f"setting up '{pyenv_name}' environment for plugin '{plugin_id}' (first use)...")
     try:
-        log.info("  creating venv at %s ...", env_directory)
+        _announce(f"creating venv at {env_directory} ...")
         subprocess.run(
             [sys.executable, "-m", "venv", str(env_directory)],
             check=True,
@@ -98,8 +111,23 @@ def _provision_plugin_env(
             text=True,
         )
 
+        pip_path = (
+            env_directory
+            / ("Scripts" if os.name == "nt" else "bin")
+            / ("pip.exe" if os.name == "nt" else "pip")
+        )
+
+        if get_pyenv_pip_upgrade():
+            _announce(f"installing via {pip_path} install --upgrade pip")
+            subprocess.run(
+                [str(python_path), "-m", "pip", "install", "--upgrade", "pip"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
         project_root = _project_root()
-        log.info("  installing testdrive + '%s' extra (this may take a while)...", plugin_id)
+        _announce(f"installing via {pip_path} -e . -e .[{plugin_id}]  (this may take a while)")
         subprocess.run(
             [
                 str(python_path),

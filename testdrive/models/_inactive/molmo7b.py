@@ -122,10 +122,11 @@ class Plugin(DetectorPlugin):
         # paging isn't a concern in the same way.
         dtype = torch.bfloat16 if self._device == "cpu" else "auto"
 
-        self._processor = load_processor(repo, cd, trust_remote_code=True)
+        self._processor = load_processor(repo, cd, self.manifest.id, trust_remote_code=True)
         self._model = load_model(
             repo,
             cd,
+            self.manifest.id,
             AutoModelForCausalLM,
             trust_remote_code=True,
             torch_dtype=dtype,

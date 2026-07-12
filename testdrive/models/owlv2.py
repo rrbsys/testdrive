@@ -104,10 +104,10 @@ class Plugin(DetectorPlugin):
         log.info("cache dir : %s", cd)
 
         log.info("loading OWLv2 processor...")
-        self._processor = load_processor(repo, cd, processor_class=Owlv2Processor)
+        self._processor = load_processor(repo, cd, self.manifest.id, processor_class=Owlv2Processor)
 
         log.info("loading OWLv2 model...")
-        self._model = load_model(repo, cd, Owlv2ForObjectDetection)
+        self._model = load_model(repo, cd, self.manifest.id, Owlv2ForObjectDetection)
 
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         log.info("using device: %s", self._device)
@@ -148,10 +148,10 @@ class Plugin(DetectorPlugin):
         log.info("cache dir : %s", cd)
 
         log.info("loading OWLv2 processor from '%s' ...", repo)
-        self._processor = load_processor(repo, cd, processor_class=Owlv2Processor)
+        self._processor = load_processor(repo, cd, self.manifest.id, processor_class=Owlv2Processor)
 
         log.info("loading OWLv2 model from '%s' ...", repo)
-        self._model = load_model(repo, cd, Owlv2ForObjectDetection)
+        self._model = load_model(repo, cd, self.manifest.id, Owlv2ForObjectDetection)
 
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         log.info("using device: %s", self._device)

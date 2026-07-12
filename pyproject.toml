@@ -85,6 +85,7 @@ module = [
     "segment_anything.*",
     "einops.*",
     "timm.*",
+    "ultralytics.*",
 ]
 ignore_missing_imports = true
 

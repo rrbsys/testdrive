@@ -82,6 +82,28 @@ def env_python_path(cd: Path, name: str = FRAMEWORK_ENV_NAME) -> Path:
     return d / "bin" / "python"
 
 
+def env_pip_path(cd: Path, name: str = FRAMEWORK_ENV_NAME) -> Path:
+    """Return the expected pip executable inside ``cache/pyenv/<name>``
+    (same existence caveat as env_python_path).
+    """
+    d = env_dir(cd, name)
+    if os.name == "nt":
+        return d / "Scripts" / "pip.exe"
+    return d / "bin" / "pip"
+
+
+def install_hint(cd: Path, name: str, packages: list[str]) -> str:
+    """A single, copy-pasteable command to install ``packages`` into the
+    named environment — the full OS-correct path to that environment's
+    own pip, not just a bare ``pip install ...`` (which would silently
+    run against whatever pip happens to be on PATH, not necessarily the
+    right environment at all).
+    """
+    pip = env_pip_path(cd, name)
+    pkgs = " ".join(f'"{p}"' for p in packages)
+    return f'"{pip}" install {pkgs}'
+
+
 def is_in_env(cd: Path, name: str = FRAMEWORK_ENV_NAME) -> bool:
     """True if the *currently running* interpreter is that environment.
 

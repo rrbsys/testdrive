@@ -20,6 +20,7 @@ needs to change.
 | `owlvit` | OWL-ViT | predecessor to OWLv2; needs a lower confidence threshold — see below |
 | `florence2` | Florence-2 | phrase-grounding via `<CAPTION_TO_PHRASE_GROUNDING>` |
 | `samgd` | Grounding DINO + SAM | GDINO box, refined to a tight mask-derived box by SAM |
+| `yolo11` | YOLO11 | fixed 80-class COCO vocabulary (not open-vocabulary like the rest — see below), fast, own `pyenv` |
 
 Two plugins are parked in `testdrive/models/_inactive/` (not
 discovered by the framework, so they don't appear in `-L`/`-I`/etc):
@@ -39,22 +40,46 @@ discovered by the framework, so they don't appear in `-L`/`-I`/etc):
   full reasoning — both are kept, not deleted, in case your hardware
   (or a future transformers/molmo release) changes the calculus.
 
+**`yolo11`** is architecturally different from every other plugin here:
+it's a *fixed*-vocabulary detector (the 80 COCO classes — `-M yolo11`
+lists them all), not open-vocabulary. Its `prompt` selects which of
+those 80 known classes to report, not a free-text description. It also
+declares five selectable sizes (`-M yolo11` → `models`), with
+`yolo11m` as the default, reasonable-middle-ground choice — override
+with `--model yolo11n` (fastest/smallest) through `--model yolo11x`
+(largest/most accurate). It's also the one plugin currently using its
+own dedicated environment (`pyenv: "newenv"`) rather than the shared
+`"framework"` one — see the next section.
+
 ## The framework's own environment
 
 testdrive insists on running from one dedicated virtual environment,
-`cache/pyenv/framework` — not because of a preference, but as a
-deliberate guard against dependency hell as more plugins accumulate
-(this project already hit that once for real: a `transformers` upgrade
-pulling in a TensorFlow chain that broke every plugin at once). If
-you start testdrive from anywhere else, it transparently relaunches
-itself from that environment if it already exists, or — on a fresh
-checkout, before that environment exists yet — stops and tells you
-exactly how to create it:
+`cache/pyenv/<platform>/framework` (keyed by `sys.platform` — a venv
+isn't portable across operating systems, and this project's own cache
+has genuinely been used from both native Windows and Wine on macOS) —
+not because of a preference, but as a deliberate guard against
+dependency hell as more plugins accumulate (this project already hit
+that once for real: a `transformers` upgrade pulling in a TensorFlow
+chain that broke every plugin at once). If you start testdrive from
+anywhere else, it transparently relaunches itself from that
+environment if it already exists, or — on a fresh checkout, before
+that environment exists yet — stops and tells you exactly how to
+create it. Three steps, not two — skip step 1 if `testdrive` already
+runs some other way (if you're seeing this message at all, it does):
 
 ```bash
-python3.12 -m venv cache/pyenv/framework            # py -3.12 ... ...\...\... on Windows
-cache/pyenv/framework/bin/pip install -e .          # cache\...\Scripts\pip.exe on Windows
-source cache/pyenv/framework/bin/activate           # cache\...\Scripts\activate on Windows
+# 1) into whatever Python you're using right now — this is what makes
+#    the `testdrive` command exist at all; without it, there's nothing
+#    to relaunch from cache/pyenv/... in the first place
+pip install -e .
+
+# 2) the dedicated environment itself (3.11 recommended on macOS, 3.12
+#    elsewhere — py -3.12 -m venv ... on Windows)
+python3.12 -m venv cache/pyenv/<platform>/framework
+
+# 3) testdrive again, this time INTO that dedicated environment —
+#    step 1 alone does not do this, they're two separate installs
+cache/pyenv/<platform>/framework/bin/pip install -e .   # ...\Scripts\pip.exe on Windows
 ```
 
 After that one-time setup, just run `testdrive` normally — the
@@ -63,15 +88,26 @@ self-relaunch is invisible from then on. (Set
 core-only smoke test, not intended for normal use.)
 
 Each plugin's manifest also carries a `pyenv` field (`-M <plugin>`).
-Every plugin here uses the default, `"framework"`, and runs in-process
-like normal. A plugin can declare a different value (e.g. `"modelx"`)
-to signal it needs isolation from the shared dependency set — set up
-that plugin's environment the same way:
+Every plugin here except `yolo11` uses the default, `"framework"`, and
+runs in-process like normal. A plugin can declare a different value
+(e.g. `yolo11` declares `"newenv"`) to signal it needs isolation from
+the shared dependency set.
 
-```bash
-python3.12 -m venv cache/pyenv/modelx
-cache/pyenv/modelx/bin/pip install -e . -e ".[modelx]"
-```
+Unlike the framework's own environment, **a plugin's own environment
+needs no manual setup at all** — testdrive provisions it automatically
+the first time it's actually needed (`-T`/`-TT`; same "don't do this
+by surprise during a plain detect run" discipline as model downloads —
+see Cache discipline below), running `python -m venv`, an optional
+`pip install --upgrade pip` first, then installing testdrive itself
+plus that plugin's own extra into it. Progress is printed as it
+happens (this can take a while — torch-class dependencies aren't
+small). Two flags control this:
+
+- `--no-auto-provision` — set the environment up by hand instead (same
+  3-step shape as the framework env, minus step 1 — see the error
+  message for the exact commands with your paths filled in).
+- `--no-pyenv-pip-upgrade` — skip the pip upgrade step, use whatever
+  pip `venv` itself bundled.
 
 When a plugin's `pyenv` isn't `"framework"`, testdrive transparently
 runs it in a worker subprocess using that environment's interpreter
@@ -80,11 +116,14 @@ in one running Python process, so this is a real process boundary, not
 just a metadata label. That worker is spawned lazily on first use and
 kept alive for the rest of the invocation, specifically so a
 loop-mode run over many images pays that plugin's `initialize()` cost
-once, not once per image. If the declared environment doesn't exist
-yet, you get the same kind of clear "here's the exact command to set
-it up" message as the framework environment's own guard, rather than a
-crash. See `testdrive/pyenv.py`, `worker_main.py`, and `worker_pool.py`
-for the full mechanism and wire protocol.
+once, not once per image. See `testdrive/pyenv.py`, `worker_main.py`,
+and `worker_pool.py` for the full mechanism and wire protocol.
+
+If a plugin reports a missing dependency (`-T`/`-TT`, or a plain
+detect run), the error always includes a single, ready-to-run command
+using that specific environment's own `pip` — the exact OS path, not
+a bare `pip install ...` that might silently run against the wrong
+Python entirely.
 
 ## Installation
 
@@ -138,7 +177,7 @@ testdrive -TT '*'
 testdrive owlv2 photo.jpg "person, bicycle"
 
 # <image> can also be a directory — every file in it is processed,
-# except files matching our own *-matches.*/*-redacted.* output pattern
+# except files matching our own *-matches*.*/*-redacted.* output pattern
 # (so re-running over an already-processed folder is safe)
 testdrive owlv2 ./photos "person"
 
@@ -156,6 +195,15 @@ testdrive owlv2 ./photos "person" --output-dir ./results
 # ship several multi-GB shards, and downloading them all at once just
 # divides the same bandwidth further rather than finishing faster)
 testdrive -T owlv2 --max-parallel-files 1
+
+# Pick a specific model variant, for plugins that declare more than one
+# (see manifest 'models' — currently just yolo11's n/s/m/l/x sizes)
+testdrive yolo11 photo.jpg "person" --model yolo11n
+
+# Set up a plugin's own environment (see "The framework's own
+# environment" above) by hand instead of automatically
+testdrive -T yolo11 --no-auto-provision
+testdrive -T yolo11 --no-pyenv-pip-upgrade   # auto-provision, but skip the pip upgrade step
 
 # Machine-readable output
 testdrive -T owlv2 --json

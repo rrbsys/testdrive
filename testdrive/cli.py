@@ -51,6 +51,7 @@ from .util import (
     set_max_parallel_files,
     set_downloads_allowed,
     set_auto_provision_enabled,
+    set_pyenv_pip_upgrade,
     CacheNotPopulatedError,
 )
 
@@ -145,6 +146,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="for plugins with their own environment (manifest 'pyenv' != \"framework\"): "
         "don't automatically create/pip-install it on first -T/-TT use — set it up by "
         'hand instead. No effect on plugins using the default "framework" environment.',
+    )
+    parser.add_argument(
+        "--pyenv-pip-upgrade",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="when auto-provisioning a plugin's environment, upgrade pip in it first "
+        "(default: on — use --no-pyenv-pip-upgrade to skip). No effect on the framework "
+        "environment itself, which is always set up by hand.",
     )
 
     parser.add_argument("plugin", nargs="?", help="plugin id, e.g. owlv2 ('*' = all plugins)")
@@ -476,11 +485,14 @@ def _run_detect_one(
         # 2. dependency check
         installed, missing = plugin.is_installed()
         if not installed:
+            from .cache import cache_dir
+            from .pyenv import install_hint
+
             msg = (
                 f"plugin '{plugin_id}' is missing dependencies:\n    "
                 + "\n    ".join(missing)
-                + "\n\nInstall with:  pip install "
-                + " ".join(f'"{p}"' for p in missing)
+                + "\n\nInstall with:  "
+                + install_hint(cache_dir(), plugin.manifest.pyenv, missing)
             )
             return ExitCode.MISSING_DEPENDENCY, None, msg
 
@@ -518,12 +530,14 @@ def _run_detect_one(
             elapsed_ms = (time.perf_counter() - t0) * 1000
         except WorkerError as exc:
             if exc.kind == "missing_dependency":
+                from .pyenv import install_hint
+
                 msg = (
                     f"plugin '{plugin_id}' is missing dependencies in its "
                     f"'{plugin.manifest.pyenv}' environment:\n    "
                     + "\n    ".join(exc.missing)
-                    + "\n\nInstall with (inside that environment):  pip install "
-                    + " ".join(f'"{p}"' for p in exc.missing)
+                    + "\n\nInstall with:  "
+                    + install_hint(cache_dir(), plugin.manifest.pyenv, exc.missing)
                 )
                 return ExitCode.MISSING_DEPENDENCY, None, msg
             if exc.kind == "cache_not_populated":
@@ -575,6 +589,7 @@ def _run_detect_one(
         image_path,
         plugin_suffix=plugin_suffix,
         output_dir=output_dir,
+        match_count=len(detections),
     )
     try:
         save_image(draw_boxes(image, detections), matches_path)
@@ -600,13 +615,15 @@ def _run_detect_one(
     return ExitCode.SUCCESS, result, None
 
 
-_OWN_OUTPUT_PATTERNS = ("*-matches.*", "*-redacted.*")
+_OWN_OUTPUT_PATTERNS = ("*-matches*.*", "*-redacted.*")
 
 
 def _is_own_output_file(path: Path) -> bool:
-    """True if *path* matches our own output naming (``*-matches.*`` /
-    ``*-redacted.*``, including plugin-suffixed variants like
-    ``photo-owlv2-matches.png`` — the glob's ``*`` covers that too).
+    """True if *path* matches our own output naming: ``*-redacted.*``,
+    or ``*-matches.*``/``*-matches<N>.*`` (the match count embedded in
+    the filename, e.g. ``photo-matches3.png`` — see
+    imageio.derive_output_paths) — including plugin-suffixed variants
+    like ``photo-owlv2-matches3.png``, which the glob's ``*`` covers too.
     """
     import fnmatch
 
@@ -1003,6 +1020,7 @@ def _dispatch(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
         set_max_parallel_files(ns.max_parallel_files)
 
     set_auto_provision_enabled(not ns.no_auto_provision)
+    set_pyenv_pip_upgrade(ns.pyenv_pip_upgrade)
 
     if ns.list:
         return cmd_list(ns.json)

@@ -629,7 +629,7 @@ def test_owlv2_initialize_uses_local_snapshot_dir():
             from testdrive.cache import cache_dir
             from testdrive.util import _local_repo_dir
 
-            expected_local_dir = _local_repo_dir(PLUGIN["hf_repo"], cache_dir())
+            expected_local_dir = _local_repo_dir(PLUGIN["id"], cache_dir())
     finally:
         os.environ.pop("TESTDRIVE_CACHE", None)
         if env_backup is not None:
@@ -841,7 +841,7 @@ def test_gdino_initialize_uses_local_snapshot_dir():
             from testdrive.cache import cache_dir
             from testdrive.util import _local_repo_dir
 
-            expected_local_dir = _local_repo_dir(PLUGIN["hf_repo"], cache_dir())
+            expected_local_dir = _local_repo_dir(PLUGIN["id"], cache_dir())
     finally:
         os.environ.pop("TESTDRIVE_CACHE", None)
         if env_backup is not None:

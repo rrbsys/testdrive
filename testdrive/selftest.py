@@ -186,9 +186,14 @@ def run_selftest(plugin_id: str, model_override: str | None = None) -> SelfTestR
         except WorkerError as exc:
             init_ms = (time.perf_counter() - t0) * 1000
             if exc.kind == "missing_dependency":
+                from .pyenv import install_hint
+
                 note = "missing: " + ", ".join(exc.missing)
                 result.add_step("dependencies", ok=False, note=note)
-                result.failures.append(f"missing packages: {', '.join(exc.missing)}")
+                hint = install_hint(cache_dir(), plugin.manifest.pyenv, exc.missing)
+                result.failures.append(
+                    f"missing packages: {', '.join(exc.missing)}\nInstall with:  {hint}"
+                )
             elif exc.kind == "env_not_configured":
                 result.add_step("environment", ok=False, note=str(exc))
                 result.failures.append(f"environment set up: {exc}")
@@ -204,9 +209,13 @@ def run_selftest(plugin_id: str, model_override: str | None = None) -> SelfTestR
         # ------------------------------------------------------------ #
         installed, missing = plugin.is_installed()
         if not installed:
+            from .cache import cache_dir
+            from .pyenv import install_hint
+
             note = "missing: " + ", ".join(missing)
             result.add_step("dependencies", ok=False, note=note)
-            result.failures.append(f"missing packages: {', '.join(missing)}")
+            hint = install_hint(cache_dir(), plugin.manifest.pyenv, missing)
+            result.failures.append(f"missing packages: {', '.join(missing)}\nInstall with:  {hint}")
             return result
         result.add_step("dependencies", ok=True)
 

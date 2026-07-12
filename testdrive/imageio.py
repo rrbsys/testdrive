@@ -72,6 +72,7 @@ def derive_output_paths(
     image_path: Path,
     plugin_suffix: str | None = None,
     output_dir: Path | None = None,
+    match_count: int | None = None,
 ) -> tuple[Path, Path]:
     """Return ``(matches_path, redacted_path)`` derived from *image_path*.
 
@@ -86,6 +87,16 @@ def derive_output_paths(
     whatever directories the input images happened to live in.
     ``output_dir`` is created if it doesn't exist yet.
 
+    If ``match_count`` is given, it's embedded directly in the
+    ``-matches`` filename (e.g. ``-matches3.png``) — the number of
+    detections actually found, so it's visible without opening the
+    file. Only known once detection has actually run, so callers derive
+    paths once up front (``match_count=None``, e.g. to check for
+    collisions) and again after detecting to get the final filename;
+    ``-redacted`` is never renamed this way, on purpose, since it's
+    meant as a stable, predictable name to overwrite in place across
+    re-runs.
+
     Examples
     --------
     >>> derive_output_paths(Path("photo.jpg"))
@@ -99,12 +110,16 @@ def derive_output_paths(
 
     >>> derive_output_paths(Path("in/photo.jpg"), output_dir=Path("out"))
     (PosixPath('out/photo-matches.png'), PosixPath('out/photo-redacted.png'))
+
+    >>> derive_output_paths(Path("photo.jpg"), match_count=3)
+    (PosixPath('photo-matches3.png'), PosixPath('photo-redacted.png'))
     """
     stem = image_path.stem
     if plugin_suffix:
         stem = f"{stem}-{plugin_suffix}"
     parent = output_dir if output_dir is not None else image_path.parent
+    matches_suffix = f"matches{match_count}" if match_count is not None else "matches"
     return (
-        parent / f"{stem}-matches.png",
+        parent / f"{stem}-{matches_suffix}.png",
         parent / f"{stem}-redacted.png",
     )
