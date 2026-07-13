@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 from ..cache import cache_dir
 from ..detection import Detection
 from ..plugin import DetectorPlugin
-from ..util import load_processor, load_model, download_file
+from ..util import load_processor, load_model, download_file, mask_to_bbox
 
 if TYPE_CHECKING:
     from PIL import Image as PILImage
@@ -171,14 +171,14 @@ class Plugin(DetectorPlugin):
                 continue
 
             mask_np = mask[0].cpu().numpy()  # (H, W) bool
-            ys, xs = np.where(mask_np)
-            if len(xs) == 0 or len(ys) == 0:
+            box = mask_to_bbox(mask_np)
+            if box is None:
                 # SAM produced an empty mask for this box (rare); fall
                 # back to Grounding DINO's raw box rather than dropping
                 # the detection entirely.
                 x1, y1, x2, y2 = gd_box
             else:
-                x1, y1, x2, y2 = xs.min(), ys.min(), xs.max(), ys.max()
+                x1, y1, x2, y2 = box
 
             detections.append(
                 Detection(

@@ -254,11 +254,7 @@ def ensure_local_repo(repo: str, cd: Path, plugin_id: str) -> Path:
 
 
 def load_processor(
-    repo: str,
-    cd: Path,
-    plugin_id: str,
-    processor_class: type[Any] | None = None,
-    **kwargs: Any,
+    repo: str, cd: Path, plugin_id: str, processor_class: type[Any] | None = None, **kwargs: Any,
 ) -> Any:
     """Robust processor loader with multiple fallbacks.
 
@@ -342,3 +338,85 @@ def download_file(url: str, dest_dir: Path, filename: str | None = None) -> Path
         tmp.unlink(missing_ok=True)
         raise
     return dest
+
+
+def ensure_git_repo(url: str, ref: str, cd: Path, plugin_id: str) -> Path:
+    """Clone a pinned commit/tag of a git repo into ``cache/repos/<plugin_id>/``.
+
+    For vendoring a research codebase that isn't a real pip package (no
+    ``setup.py``/``pyproject.toml`` for pip to build) but is still just
+    a git repo — e.g. SEEM's own modeling code, as opposed to its
+    pip-installable ``detectron2`` fork dependency, which belongs in
+    ``pyproject.toml`` instead. Callers typically ``sys.path.insert()``
+    the returned directory (or a subdirectory of it) before importing
+    from it.
+
+    ``ref`` should be a commit SHA or tag, not a branch — this caches
+    forever once cloned (see the marker file below), so a branch name
+    would silently keep serving whatever commit happened to be HEAD the
+    first time it was cloned, on every machine, indefinitely.
+
+    A ``.testdrive_complete`` marker file is written once the checkout
+    succeeds, so repeated calls are a no-op — same convention as
+    :func:`ensure_local_repo`. Clones into a ``.part``-suffixed
+    directory first and only renames it into place on success (mirroring
+    :func:`download_file`'s own atomicity trick), so an interrupted or
+    failed clone/checkout can't leave a corrupt directory that looks
+    "already cloned" on the next run.
+
+    Raises ``CacheNotPopulatedError`` if not yet cloned and downloads are
+    currently disallowed (see ``set_downloads_allowed``), and lets
+    ``subprocess.CalledProcessError`` propagate as-is on a real git
+    failure (bad URL, bad ref, no network, etc.) — same "don't wrap what
+    we don't need to" approach as ``ensure_local_repo`` takes with
+    ``huggingface_hub`` errors.
+    """
+    import shutil
+    import subprocess
+
+    target = cd / "repos" / plugin_id
+    marker = target / ".testdrive_complete"
+    if marker.exists():
+        return target
+
+    if not _downloads_allowed:
+        raise CacheNotPopulatedError(f"{url}@{ref}", target)
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(target.name + ".part")
+    shutil.rmtree(tmp, ignore_errors=True)
+
+    log.info("cloning %s@%s -> %s", url, ref, target)
+    try:
+        subprocess.run(["git", "clone", url, str(tmp)], check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", "-C", str(tmp), "checkout", ref], check=True, capture_output=True, text=True
+        )
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+
+    shutil.rmtree(target, ignore_errors=True)
+    tmp.replace(target)
+    marker.touch()
+    return target
+
+
+def mask_to_bbox(mask: Any) -> tuple[int, int, int, int] | None:
+    """Tight ``(x1, y1, x2, y2)`` box around a boolean/0-1 mask array's
+    nonzero pixels, or ``None`` if the mask is empty.
+
+    :class:`~testdrive.detection.Detection` is bbox-only — there's no
+    mask field to return (see ``samgd.py``'s module docstring) — so any
+    plugin whose native output is a segmentation mask (SAM, SEEM, ...)
+    needs to reduce each mask to a box before returning a ``Detection``.
+    Shared here since more than one plugin does exactly this reduction,
+    the same way, rather than duplicating the ``np.where`` dance in each.
+    """
+    import numpy as np
+
+    mask_np = np.asarray(mask)
+    ys, xs = np.where(mask_np)
+    if len(xs) == 0 or len(ys) == 0:
+        return None
+    return (int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max()))

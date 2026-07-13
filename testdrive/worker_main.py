@@ -182,15 +182,13 @@ def main(argv: list[str]) -> int:
         try:
             image = load_image(Path(request["image_path"]))
             detections = plugin.detect(image, request["prompt"], threshold=request["threshold"])
-            _respond(
-                {
-                    "ok": True,
-                    "detections": [
-                        {"label": d.label, "score": d.score, "bbox": list(d.bbox)}
-                        for d in detections
-                    ],
-                }
-            )
+            _respond({
+                "ok": True,
+                "detections": [
+                    {"label": d.label, "score": d.score, "bbox": list(d.bbox)}
+                    for d in detections
+                ],
+            })
         except Exception as exc:  # noqa: BLE001
             _respond({"ok": False, "kind": "error", "message": f"detect() raised: {exc}"})
 

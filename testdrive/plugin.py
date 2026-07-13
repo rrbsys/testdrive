@@ -73,9 +73,7 @@ class DetectorPlugin(ABC):
         every other instance of this plugin for the rest of the process.
         """
         if not self.manifest.models:
-            raise ValueError(
-                f"plugin '{self.manifest.id}' does not support --model (no models declared)"
-            )
+            raise ValueError(f"plugin '{self.manifest.id}' does not support --model (no models declared)")
         if model not in self.manifest.models:
             raise ValueError(
                 f"invalid model '{model}' for plugin '{self.manifest.id}'; "

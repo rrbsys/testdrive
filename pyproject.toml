@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "testdrive"
-version = "0.1.2"
+version = "0.1.1"
 description = "One CLI. Many vision foundation models."
 readme = "README.md"
 license = { text = "MIT" }
@@ -51,7 +51,34 @@ samgd         = ["torch>=2.2", "transformers==4.50.3", "numpy", "segment-anythin
 # yolo11 doesn't use transformers at all, so it's unaffected by the pin
 # above — just torch + ultralytics.
 yolo11        = ["torch>=2.2", "ultralytics>=8.3"]
-# Every active plugin's dependencies at once.
+# SEEM lives in testdrive/models_inactive/ (see pluginloader.py /
+# README) and always runs in its own "seem" pyenv (see
+# PluginManifest.pyenv) — deliberately never part of "all" below, and
+# never sharing an environment with any other plugin. That isolation
+# is what makes it safe to pin the old/exotic dependency chain the
+# upstream repo actually needs without it ever touching anyone else's
+# environment.
+#
+# detectron2-xyz is UX-Decoder's own maintained fork of detectron2
+# (adds a couple of ops SEEM's encoder needs) — the same fork the
+# sibling UX-Decoder/Semantic-SAM repo's own install instructions use.
+# SEEM's own modeling code isn't a real pip package at all (no
+# setup.py/pyproject.toml upstream), so it's cloned at runtime instead
+# of listed here — see ensure_git_repo() / SEEM_REPO_URL in seem.py.
+#
+# The torch/torchvision pins below are carried over from the install
+# instructions for this same dependency chain elsewhere in the
+# UX-Decoder family of repos — verify against
+# assets/requirements/requirements.txt in the actual cloned SEEM repo
+# once it's cloned, and correct these if they've drifted.
+seem = [
+    "torch==1.13.1",
+    "torchvision==0.14.1",
+    "opencv-python",
+    "detectron2 @ git+https://github.com/MaureenZOU/detectron2-xyz.git",
+]
+# Every active plugin's dependencies at once. Deliberately excludes
+# "seem" — see its own comment above.
 all = ["testdrive[groundingdino,owlv2,owlvit,florence2,samgd,yolo11]"]
 dev = ["pytest>=7.0", "ruff>=0.4", "mypy>=1.8"]
 

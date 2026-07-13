@@ -191,9 +191,7 @@ def run_selftest(plugin_id: str, model_override: str | None = None) -> SelfTestR
                 note = "missing: " + ", ".join(exc.missing)
                 result.add_step("dependencies", ok=False, note=note)
                 hint = install_hint(cache_dir(), plugin.manifest.pyenv, exc.missing)
-                result.failures.append(
-                    f"missing packages: {', '.join(exc.missing)}\nInstall with:  {hint}"
-                )
+                result.failures.append(f"missing packages: {', '.join(exc.missing)}\nInstall with:  {hint}")
             elif exc.kind == "env_not_configured":
                 result.add_step("environment", ok=False, note=str(exc))
                 result.failures.append(f"environment set up: {exc}")

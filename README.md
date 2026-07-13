@@ -22,7 +22,7 @@ needs to change.
 | `samgd` | Grounding DINO + SAM | GDINO box, refined to a tight mask-derived box by SAM |
 | `yolo11` | YOLO11 | fixed 80-class COCO vocabulary (not open-vocabulary like the rest — see below), fast, own `pyenv` |
 
-Two plugins are parked in `testdrive/models_inactive/` (a sibling of
+Three plugins are parked in `testdrive/models_inactive/` (a sibling of
 `testdrive/models/`, not a subpackage of it — so its files use the
 same relative-import depth as an active plugin's). They're never
 discovered automatically, so they don't appear in `-L`/`-I`/`-M
@@ -36,12 +36,20 @@ testdrive -T ../models_inactive/molmo
 testdrive ../models_inactive/seem photo.jpg "a cat"
 ```
 
-- **`seem`** — there is no `transformers`-compatible SEEM model. The
-  only HF repo for it ships raw checkpoint files with no
-  `config.json`/processor/modeling code — nothing for `AutoModel*` to
-  load, `trust_remote_code=True` or not. Making it real would mean
-  vendoring the original research repo's own loader, which is out of
-  scope here.
+- **`seem`** — scaffolded on `feature/seem` / `plugin/seem`, not yet
+  real. There's no `transformers`-compatible SEEM model (the only HF
+  repo for it ships raw checkpoint files, nothing `AutoModel*` can
+  load), and the upstream research repo needs its own old/exotic
+  dependency chain (a `detectron2` fork, an old pinned torch) that no
+  other plugin here should ever be exposed to — so `seem` declares its
+  own `"pyenv": "seem"` (see `PluginManifest.pyenv`) rather than the
+  default `"framework"`, auto-provisioning an entirely separate virtual
+  environment on first use. The repo/checkpoint-fetching plumbing is
+  real (see `util.ensure_git_repo`/`download_file`); the actual model
+  construction and inference call are not yet verified against the
+  real upstream source — see the `TODO(seem):` comments in
+  `models_inactive/seem.py`'s own module docstring for exactly what's
+  left.
 - **`molmo` / `molmo7b`** — Molmo points at things rather than drawing
   boxes, so its output is approximated into small boxes centered on
   each point. The dense 7B model (`molmo7b.py`) didn't reliably finish

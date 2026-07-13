@@ -51,10 +51,8 @@ def test_provision_plugin_env_runs_venv_then_pip_upgrade_then_installs():
 
     with tempfile.TemporaryDirectory() as td:
         env_dir = Path(td) / "envs" / "newenv"
-        python_path = (
-            env_dir
-            / ("Scripts" if os.name == "nt" else "bin")
-            / ("python.exe" if os.name == "nt" else "python")
+        python_path = env_dir / ("Scripts" if os.name == "nt" else "bin") / (
+            "python.exe" if os.name == "nt" else "python"
         )
 
         calls = []
@@ -171,10 +169,8 @@ def test_provision_plugin_env_marker_write_failure_is_non_fatal():
         def fake_write_text(self, *a, **kw):
             raise OSError("disk full")
 
-        with (
-            mock.patch("subprocess.run", side_effect=fake_run),
-            mock.patch.object(Path, "write_text", fake_write_text),
-        ):
+        with mock.patch("subprocess.run", side_effect=fake_run), \
+             mock.patch.object(Path, "write_text", fake_write_text):
             _provision_plugin_env("yolo11", "newenv", env_dir, python_path)  # must not raise
 
 
@@ -243,10 +239,8 @@ def test_pool_get_provisions_then_spawns_worker():
 
         provision_target = "testdrive.worker_pool._provision_plugin_env"
         handle_target = "testdrive.worker_pool.WorkerHandle"
-        with (
-            mock.patch(provision_target, side_effect=fake_provision),
-            mock.patch(handle_target, return_value=fake_handle),
-        ):
+        with mock.patch(provision_target, side_effect=fake_provision), \
+             mock.patch(handle_target, return_value=fake_handle):
             pool = WorkerPool()
             handle = pool.get("yolo11", "newenv", cd)
 
@@ -303,8 +297,7 @@ def test_provision_plugin_env_real_venv_end_to_end():
     base_python = getattr(sys, "_base_executable", None) or sys.executable
     probe = _subprocess.run(
         [base_python, "-c", "import setuptools, wheel"],
-        capture_output=True,
-        text=True,
+        capture_output=True, text=True,
     )
     if probe.returncode != 0:
         pytest.skip(
@@ -326,10 +319,8 @@ def test_provision_plugin_env_real_venv_end_to_end():
 
     with tempfile.TemporaryDirectory() as td:
         env_dir = Path(td) / "pyenv" / sys.platform / "newenv"
-        python_path = (
-            env_dir
-            / ("Scripts" if os.name == "nt" else "bin")
-            / ("python.exe" if os.name == "nt" else "python")
+        python_path = env_dir / ("Scripts" if os.name == "nt" else "bin") / (
+            "python.exe" if os.name == "nt" else "python"
         )
 
         real_run = subprocess.run
@@ -347,10 +338,7 @@ def test_provision_plugin_env_real_venv_end_to_end():
         try:
             with mock.patch("subprocess.run", side_effect=run_offline_friendly):
                 worker_pool._provision_plugin_env(
-                    "core-only-test",
-                    "newenv",
-                    env_dir,
-                    python_path,
+                    "core-only-test", "newenv", env_dir, python_path,
                 )
 
             assert python_path.exists()
@@ -358,8 +346,7 @@ def test_provision_plugin_env_real_venv_end_to_end():
 
             check = subprocess.run(
                 [str(python_path), "-c", "import testdrive; print(testdrive.__name__)"],
-                capture_output=True,
-                text=True,
+                capture_output=True, text=True,
             )
             assert check.returncode == 0
             assert check.stdout.strip() == "testdrive"

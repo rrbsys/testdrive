@@ -59,9 +59,7 @@ def _provision_marker_path(env_directory: Path) -> Path:
     return env_directory / ".testdrive_plugin_ok"
 
 
-def _provision_plugin_env(
-    plugin_id: str, pyenv_name: str, env_directory: Path, python_path: Path
-) -> None:
+def _provision_plugin_env(plugin_id: str, pyenv_name: str, env_directory: Path, python_path: Path) -> None:
     """Automatically create and set up a plugin's own environment.
 
     Unlike the framework's own environment (which the user must set up
@@ -106,42 +104,27 @@ def _provision_plugin_env(
         _announce(f"creating venv at {env_directory} ...")
         subprocess.run(
             [sys.executable, "-m", "venv", str(env_directory)],
-            check=True,
-            capture_output=True,
-            text=True,
+            check=True, capture_output=True, text=True,
         )
 
-        pip_path = (
-            env_directory
-            / ("Scripts" if os.name == "nt" else "bin")
-            / ("pip.exe" if os.name == "nt" else "pip")
-        )
+        pip_path = env_directory / ("Scripts" if os.name == "nt" else "bin") / ("pip.exe" if os.name == "nt" else "pip")
 
         if get_pyenv_pip_upgrade():
             _announce(f"installing via {pip_path} install --upgrade pip")
             subprocess.run(
                 [str(python_path), "-m", "pip", "install", "--upgrade", "pip"],
-                check=True,
-                capture_output=True,
-                text=True,
+                check=True, capture_output=True, text=True,
             )
 
         project_root = _project_root()
         _announce(f"installing via {pip_path} -e . -e .[{plugin_id}]  (this may take a while)")
         subprocess.run(
             [
-                str(python_path),
-                "-m",
-                "pip",
-                "install",
-                "-e",
-                str(project_root),
-                "-e",
-                f"{project_root}[{plugin_id}]",
+                str(python_path), "-m", "pip", "install",
+                "-e", str(project_root),
+                "-e", f"{project_root}[{plugin_id}]",
             ],
-            check=True,
-            capture_output=True,
-            text=True,
+            check=True, capture_output=True, text=True,
         )
     except subprocess.CalledProcessError as exc:
         raise WorkerError(
@@ -151,8 +134,7 @@ def _provision_plugin_env(
         ) from exc
     except OSError as exc:
         raise WorkerError(
-            "error",
-            f"could not set up '{pyenv_name}' environment for plugin '{plugin_id}': {exc}",
+            "error", f"could not set up '{pyenv_name}' environment for plugin '{plugin_id}': {exc}",
         ) from exc
 
     try:
@@ -174,9 +156,7 @@ class WorkerHandle:
         env = os.environ.copy()
         env["TESTDRIVE_WORKER_DOWNLOADS_ALLOWED"] = "1" if get_downloads_allowed() else "0"
         max_parallel = get_max_parallel_files()
-        env["TESTDRIVE_WORKER_MAX_PARALLEL_FILES"] = (
-            str(max_parallel) if max_parallel is not None else ""
-        )
+        env["TESTDRIVE_WORKER_MAX_PARALLEL_FILES"] = str(max_parallel) if max_parallel is not None else ""
 
         self._proc = subprocess.Popen(
             [str(python_path), "-m", "testdrive.worker_main", plugin_id],
@@ -204,9 +184,7 @@ class WorkerHandle:
             self._proc.stdin.write(json.dumps(request) + "\n")
             self._proc.stdin.flush()
         except (BrokenPipeError, OSError) as exc:
-            raise WorkerError(
-                "error", f"worker for '{self.plugin_id}' is no longer running: {exc}"
-            ) from exc
+            raise WorkerError("error", f"worker for '{self.plugin_id}' is no longer running: {exc}") from exc
 
         line = self._proc.stdout.readline()
         if not line:
@@ -223,11 +201,7 @@ class WorkerHandle:
         )
 
     def detect(
-        self,
-        image_path: Path,
-        prompt: str,
-        threshold: float,
-        model: str | None,
+        self, image_path: Path, prompt: str, threshold: float, model: str | None,
     ) -> list["Detection"]:
         from .detection import Detection
 
@@ -245,9 +219,7 @@ class WorkerHandle:
             self._proc.stdin.write(json.dumps(request) + "\n")
             self._proc.stdin.flush()
         except (BrokenPipeError, OSError) as exc:
-            raise WorkerError(
-                "error", f"worker for '{self.plugin_id}' is no longer running: {exc}"
-            ) from exc
+            raise WorkerError("error", f"worker for '{self.plugin_id}' is no longer running: {exc}") from exc
 
         line = self._proc.stdout.readline()
         if not line:

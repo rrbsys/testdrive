@@ -240,12 +240,10 @@ def test_ensure_framework_env_relaunches_when_target_exists():
         # matching how ensure_framework_env's own `return` afterward
         # would be reached if it somehow did.
 
-    with (
-        mock.patch.object(sys, "argv", ["testdrive"]),
-        mock.patch.object(pyenv, "is_in_env", return_value=False),
-        mock.patch.object(pyenv.Path, "exists", return_value=True),
-        mock.patch.object(pyenv.os, "execve", side_effect=fake_execve),
-    ):
+    with mock.patch.object(sys, "argv", ["testdrive"]), \
+         mock.patch.object(pyenv, "is_in_env", return_value=False), \
+         mock.patch.object(pyenv.Path, "exists", return_value=True), \
+         mock.patch.object(pyenv.os, "execve", side_effect=fake_execve):
         exit_code, stderr = _run_ensure(cd)
 
     assert exit_code is None
@@ -263,10 +261,8 @@ def test_ensure_framework_env_missing_env_prints_setup_instructions():
     os.environ.pop(pyenv._SKIP_ENV_VAR, None)
     os.environ.pop(pyenv._RELAUNCH_MARKER, None)
 
-    with (
-        mock.patch.object(pyenv, "is_in_env", return_value=False),
-        mock.patch.object(pyenv.Path, "exists", return_value=False),
-    ):
+    with mock.patch.object(pyenv, "is_in_env", return_value=False), \
+         mock.patch.object(pyenv.Path, "exists", return_value=False):
         exit_code, stderr = _run_ensure(cd)
 
     from testdrive.util import ExitCode
@@ -287,11 +283,9 @@ def test_ensure_framework_env_execve_oserror_falls_back_to_instructions():
     def fake_execve(*a, **kw):
         raise OSError("no such file")
 
-    with (
-        mock.patch.object(pyenv, "is_in_env", return_value=False),
-        mock.patch.object(pyenv.Path, "exists", return_value=True),
-        mock.patch.object(pyenv.os, "execve", side_effect=fake_execve),
-    ):
+    with mock.patch.object(pyenv, "is_in_env", return_value=False), \
+         mock.patch.object(pyenv.Path, "exists", return_value=True), \
+         mock.patch.object(pyenv.os, "execve", side_effect=fake_execve):
         exit_code, stderr = _run_ensure(cd)
 
     from testdrive.util import ExitCode
@@ -313,10 +307,8 @@ def test_ensure_framework_env_bounded_retry_when_relaunch_marker_already_set():
     os.environ[pyenv._RELAUNCH_MARKER] = "1"
     try:
         boom = AssertionError("must not relaunch again")
-        with (
-            mock.patch.object(pyenv, "is_in_env", return_value=False),
-            mock.patch.object(pyenv.os, "execve", side_effect=boom),
-        ):
+        with mock.patch.object(pyenv, "is_in_env", return_value=False), \
+             mock.patch.object(pyenv.os, "execve", side_effect=boom):
             exit_code, stderr = _run_ensure(cd)
     finally:
         del os.environ[pyenv._RELAUNCH_MARKER]
@@ -343,11 +335,9 @@ def test_ensure_framework_env_relaunch_argv_forwards_cli_args():
     argv_backup = sys.argv
     sys.argv = ["testdrive", "groundingdino", "photo.jpg", "cat"]
     try:
-        with (
-            mock.patch.object(pyenv, "is_in_env", return_value=False),
-            mock.patch.object(pyenv.Path, "exists", return_value=True),
-            mock.patch.object(pyenv.os, "execve", side_effect=fake_execve),
-        ):
+        with mock.patch.object(pyenv, "is_in_env", return_value=False), \
+             mock.patch.object(pyenv.Path, "exists", return_value=True), \
+             mock.patch.object(pyenv.os, "execve", side_effect=fake_execve):
             _run_ensure(cd)
     finally:
         sys.argv = argv_backup
