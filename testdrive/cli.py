@@ -44,12 +44,14 @@ from . import __version__
 from .annotate import draw_boxes, redact
 from .detection import DetectionResult, PluginManifest
 from .imageio import derive_output_paths, load_image, save_image
-from .pluginloader import PluginLoadError, iter_loadable_plugins, load_plugin
+from .pluginloader import PluginLoadError, display_name, iter_loadable_plugins, load_plugin
 from .util import (
     ExitCode,
     setup_logging,
     set_max_parallel_files,
     set_downloads_allowed,
+    set_auto_provision_enabled,
+    set_pyenv_pip_upgrade,
     CacheNotPopulatedError,
 )
 
@@ -138,6 +140,21 @@ def build_parser() -> argparse.ArgumentParser:
         "than one (see manifest 'models', e.g. yolo11n/s/m/l/x). No effect on plugins "
         "with a single fixed model.",
     )
+    parser.add_argument(
+        "--no-auto-provision",
+        action="store_true",
+        help="for plugins with their own environment (manifest 'pyenv' != \"framework\"): "
+        "don't automatically create/pip-install it on first -T/-TT use — set it up by "
+        'hand instead. No effect on plugins using the default "framework" environment.',
+    )
+    parser.add_argument(
+        "--pyenv-pip-upgrade",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="when auto-provisioning a plugin's environment, upgrade pip in it first "
+        "(default: on — use --no-pyenv-pip-upgrade to skip). No effect on the framework "
+        "environment itself, which is always set up by hand.",
+    )
 
     parser.add_argument("plugin", nargs="?", help="plugin id, e.g. owlv2 ('*' = all plugins)")
     parser.add_argument("image", nargs="?", help="path to an input image, or a directory of images")
@@ -196,6 +213,7 @@ def _print_manifest_text(m: PluginManifest) -> None:
         print(f"HF Repository  : {m.hf_repo}")
     if m.task:
         print(f"Task           : {m.task}")
+    print(f"Pyenv          : {m.pyenv}")
     print()
     if m.supports:
         print("Supports")
@@ -358,6 +376,8 @@ def cmd_selftest(plugin_id: str, as_json: bool, model_override: str | None = Non
         return ExitCode.SUCCESS
     elif result.failures and "missing" in result.failures[0]:
         return ExitCode.MISSING_DEPENDENCY
+    elif result.failures and "environment set up" in result.failures[0]:
+        return ExitCode.PYENV_NOT_CONFIGURED
     elif "load plugin" in (result.steps[0] if result.steps else ""):
         return ExitCode.PLUGIN_NOT_FOUND
     else:
@@ -444,25 +464,40 @@ def _run_detect_one(
 
     # 1.5. --model override, if given (a CLI-level user-input error, so
     # checked before dependencies — an invalid model name is wrong
-    # regardless of what's installed)
+    # regardless of what's installed). Safe to do here even for
+    # worker-routed plugins below: this only touches static manifest
+    # data (dataclasses.replace), no heavy imports.
     if model_override:
         try:
             plugin.set_model_override(model_override)
         except ValueError as exc:
             return ExitCode.CLI_ERROR, None, str(exc)
 
-    # 2. dependency check
-    installed, missing = plugin.is_installed()
-    if not installed:
-        msg = (
-            f"plugin '{plugin_id}' is missing dependencies:\n    "
-            + "\n    ".join(missing)
-            + "\n\nInstall with:  pip install "
-            + " ".join(f'"{p}"' for p in missing)
-        )
-        return ExitCode.MISSING_DEPENDENCY, None, msg
+    # Plugins with a non-"framework" pyenv can't be dependency-checked,
+    # initialized, or run in this process at all — their dependencies
+    # live in a different environment entirely (that's the whole point
+    # of declaring a different pyenv; see PluginManifest.pyenv). Those
+    # three steps happen on the other side of a worker subprocess
+    # instead — see pyenv.py / worker_main.py / worker_pool.py.
+    uses_worker = plugin.manifest.pyenv != "framework"
 
-    # 3. load image
+    if not uses_worker:
+        # 2. dependency check
+        installed, missing = plugin.is_installed()
+        if not installed:
+            from .cache import cache_dir
+            from .pyenv import install_hint
+
+            msg = (
+                f"plugin '{plugin_id}' is missing dependencies:\n    "
+                + "\n    ".join(missing)
+                + "\n\nInstall with:  "
+                + install_hint(cache_dir(), plugin.manifest.pyenv, missing)
+            )
+            return ExitCode.MISSING_DEPENDENCY, None, msg
+
+    # 3. load image (always in-process — core Pillow work, unaffected
+    # by which pyenv a plugin declares)
     try:
         image = load_image(image_path)
     except FileNotFoundError as exc:
@@ -473,37 +508,88 @@ def _run_detect_one(
     width, height = image.size
     log.info("image loaded: %s (%dx%d)", image_path.name, width, height)
 
-    # 4. initialize plugin
-    try:
-        log.info("initializing plugin '%s' ...", plugin_id)
-        plugin.initialize()
-    except CacheNotPopulatedError as exc:
-        return (
-            ExitCode.MISSING_DEPENDENCY,
-            None,
-            (
-                f"plugin '{plugin_id}' needs its model downloaded first ({exc}). "
-                f"Run `testdrive -T {plugin_id}` (or -TT {plugin_id}) once to populate the "
-                f"cache, then re-run this command."
-            ),
-        )
-    except Exception as exc:  # noqa: BLE001
-        return ExitCode.INFERENCE_FAILED, None, f"plugin '{plugin_id}' initialize() failed: {exc}"
+    if uses_worker:
+        # 4 + 5 (worker path): a worker subprocess, kept alive across
+        # this whole testdrive invocation, handles dependency checking,
+        # initialize(), and detect() on the other side of the process
+        # boundary — so a loop-mode run over many images only pays this
+        # plugin's initialize() cost once, not once per image.
+        from .cache import cache_dir
+        from .worker_pool import WorkerError, get_pool
 
-    # 5. run inference
-    try:
-        log.info("running detection: prompt=%r threshold=%.2f", prompt, threshold)
-        t0 = time.perf_counter()
-        detections = plugin.detect(image, prompt, threshold=threshold)
-        elapsed_ms = (time.perf_counter() - t0) * 1000
-    except Exception as exc:  # noqa: BLE001
-        return ExitCode.INFERENCE_FAILED, None, f"plugin '{plugin_id}' detect() raised: {exc}"
+        try:
+            worker = get_pool().get(plugin_id, plugin.manifest.pyenv, cache_dir())
+            log.info(
+                "running detection via '%s' worker: prompt=%r threshold=%.2f",
+                plugin.manifest.pyenv,
+                prompt,
+                threshold,
+            )
+            t0 = time.perf_counter()
+            detections = worker.detect(image_path, prompt, threshold, plugin.manifest.model or None)
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+        except WorkerError as exc:
+            if exc.kind == "missing_dependency":
+                from .pyenv import install_hint
+
+                msg = (
+                    f"plugin '{plugin_id}' is missing dependencies in its "
+                    f"'{plugin.manifest.pyenv}' environment:\n    "
+                    + "\n    ".join(exc.missing)
+                    + "\n\nInstall with:  "
+                    + install_hint(cache_dir(), plugin.manifest.pyenv, exc.missing)
+                )
+                return ExitCode.MISSING_DEPENDENCY, None, msg
+            if exc.kind == "cache_not_populated":
+                return (
+                    ExitCode.MISSING_DEPENDENCY,
+                    None,
+                    (
+                        f"plugin '{plugin_id}' needs its model downloaded first ({exc}). "
+                        f"Run `testdrive -T {plugin_id}` (or -TT {plugin_id}) once to populate the "
+                        f"cache, then re-run this command."
+                    ),
+                )
+            if exc.kind == "env_not_configured":
+                return ExitCode.PYENV_NOT_CONFIGURED, None, str(exc)
+            return ExitCode.INFERENCE_FAILED, None, f"plugin '{plugin_id}' (worker): {exc}"
+    else:
+        # 4. initialize plugin
+        try:
+            log.info("initializing plugin '%s' ...", plugin_id)
+            plugin.initialize()
+        except CacheNotPopulatedError as exc:
+            return (
+                ExitCode.MISSING_DEPENDENCY,
+                None,
+                (
+                    f"plugin '{plugin_id}' needs its model downloaded first ({exc}). "
+                    f"Run `testdrive -T {plugin_id}` (or -TT {plugin_id}) once to populate the "
+                    f"cache, then re-run this command."
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return (
+                ExitCode.INFERENCE_FAILED,
+                None,
+                f"plugin '{plugin_id}' initialize() failed: {exc}",
+            )
+
+        # 5. run inference
+        try:
+            log.info("running detection: prompt=%r threshold=%.2f", prompt, threshold)
+            t0 = time.perf_counter()
+            detections = plugin.detect(image, prompt, threshold=threshold)
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+        except Exception as exc:  # noqa: BLE001
+            return ExitCode.INFERENCE_FAILED, None, f"plugin '{plugin_id}' detect() raised: {exc}"
 
     # 6. annotate + save
     matches_path, redacted_path = derive_output_paths(
         image_path,
         plugin_suffix=plugin_suffix,
         output_dir=output_dir,
+        match_count=len(detections),
     )
     try:
         save_image(draw_boxes(image, detections), matches_path)
@@ -529,13 +615,15 @@ def _run_detect_one(
     return ExitCode.SUCCESS, result, None
 
 
-_OWN_OUTPUT_PATTERNS = ("*-matches.*", "*-redacted.*")
+_OWN_OUTPUT_PATTERNS = ("*-matches*.*", "*-redacted.*")
 
 
 def _is_own_output_file(path: Path) -> bool:
-    """True if *path* matches our own output naming (``*-matches.*`` /
-    ``*-redacted.*``, including plugin-suffixed variants like
-    ``photo-owlv2-matches.png`` — the glob's ``*`` covers that too).
+    """True if *path* matches our own output naming: ``*-redacted.*``,
+    or ``*-matches.*``/``*-matches<N>.*`` (the match count embedded in
+    the filename, e.g. ``photo-matches3.png`` — see
+    imageio.derive_output_paths) — including plugin-suffixed variants
+    like ``photo-owlv2-matches3.png``, which the glob's ``*`` covers too.
     """
     import fnmatch
 
@@ -696,13 +784,17 @@ def _examples_dir() -> Path:
 
 
 def _find_example_image(plugin_id: str) -> tuple[Path, str, int] | None:
-    """Find ``examples/<plugin_id>/image1-prompt-<slug>-<N>matches.*`` and
-    parse out the prompt and expected match count. Returns
+    """Find ``examples/<name>/image1-prompt-<slug>-<N>matches.*`` and
+    parse out the prompt and expected match count, where ``<name>`` is
+    ``plugin_id``'s :func:`~testdrive.pluginloader.display_name` (the
+    manifest id normally, or the bare basename for an explicit
+    ``../models_inactive/<name>`` reference — never the raw path
+    itself, which isn't a real examples/ subdirectory). Returns
     ``(path, prompt, expected_count)``, or ``None`` if there's no
     examples directory for this plugin, or no file in it matches the
     ``image1-prompt-...-<N>matches.<ext>`` naming convention.
     """
-    plugin_dir = _examples_dir() / plugin_id
+    plugin_dir = _examples_dir() / display_name(plugin_id)
     if not plugin_dir.is_dir():
         return None
 
@@ -760,7 +852,7 @@ def _run_example_test_one(
             "passed": False,
             "error": (
                 f"no usable example for '{plugin_id}': expected "
-                f"examples/{plugin_id}/image1-prompt-<slug>-<N>matches.<ext>"
+                f"examples/{display_name(plugin_id)}/image1-prompt-<slug>-<N>matches.<ext>"
             ),
         }
 
@@ -912,11 +1004,27 @@ def main(argv: list[str] | None = None) -> int:
     ns = parser.parse_args(argv)
     setup_logging(ns.verbose)
 
+    try:
+        return _dispatch(parser, ns)
+    finally:
+        # Guaranteed regardless of how dispatch exits (success, a
+        # returned error code, or an uncaught exception) — safe/cheap
+        # to call even if no worker was ever spawned this run (e.g.
+        # every plugin used was "framework"-pyenv, running in-process).
+        from .worker_pool import shutdown_all_workers
+
+        shutdown_all_workers()
+
+
+def _dispatch(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
     if ns.max_parallel_files is not None:
         if ns.max_parallel_files < 1:
             log.error("--max-parallel-files must be >= 1 (got %d)", ns.max_parallel_files)
             return ExitCode.CLI_ERROR
         set_max_parallel_files(ns.max_parallel_files)
+
+    set_auto_provision_enabled(not ns.no_auto_provision)
+    set_pyenv_pip_upgrade(ns.pyenv_pip_upgrade)
 
     if ns.list:
         return cmd_list(ns.json)
@@ -969,5 +1077,24 @@ def main(argv: list[str] | None = None) -> int:
     return ExitCode.CLI_ERROR
 
 
+def entrypoint() -> int:
+    """Real CLI entry point (installed ``testdrive`` command, and
+    ``python -m testdrive``) — enforces the framework-environment guard
+    (see ``pyenv.ensure_framework_env``) before doing anything else,
+    then behaves exactly like ``main()``.
+
+    Deliberately separate from ``main()``: the test suite calls
+    ``main()`` directly so it's never subject to the environment guard
+    (tests shouldn't need a real ``cache/pyenv/framework`` to run), and
+    that's also why ``pyroject.toml``'s console script and
+    ``__main__.py`` both point at this function instead of ``main``.
+    """
+    from .cache import cache_dir
+    from .pyenv import ensure_framework_env
+
+    ensure_framework_env(cache_dir())
+    return main()
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(entrypoint())

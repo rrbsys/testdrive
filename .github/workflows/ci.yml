@@ -58,6 +58,11 @@ jobs:
         run: pip install -e .
 
       - name: -L / -I / -M all work with only Pillow installed
+        env:
+          # This job deliberately runs from whatever plain venv the CI
+          # runner set up, not a dedicated cache/pyenv/framework — skip
+          # the self-relaunch guard that real end-user usage enforces.
+          TESTDRIVE_SKIP_PYENV_CHECK: "1"
         run: |
           python -m testdrive -L
           python -m testdrive -I

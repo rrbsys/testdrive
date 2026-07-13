@@ -70,6 +70,7 @@ PLUGIN = {
     ],
     "sample_prompt": "red star",
     "test_threshold": "default",
+    "pyenv": "framework",
 }
 
 
@@ -92,10 +93,10 @@ class Plugin(DetectorPlugin):
         cd = cache_dir()
 
         log.info("loading Grounding DINO processor...")
-        self._processor = load_processor(repo, cd)
+        self._processor = load_processor(repo, cd, self.manifest.id)
 
         log.info("loading Grounding DINO model...")
-        self._model = load_model(repo, cd, AutoModelForZeroShotObjectDetection)
+        self._model = load_model(repo, cd, self.manifest.id, AutoModelForZeroShotObjectDetection)
 
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         self._model = self._model.to(self._device)

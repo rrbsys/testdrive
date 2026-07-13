@@ -48,6 +48,7 @@ PLUGIN = {
     ],
     "sample_prompt": "green triangle",
     "test_threshold": "default",
+    "pyenv": "framework",
 }
 
 
@@ -72,13 +73,13 @@ class Plugin(DetectorPlugin):
         # Load Grounding DINO
         repo = self.manifest.hf_repo
         cd = cache_dir()
-        self._processor = load_processor(repo, cd)
-        self._gd_model = load_model(repo, cd, AutoModelForZeroShotObjectDetection)
+        self._processor = load_processor(repo, cd, self.manifest.id)
+        self._gd_model = load_model(repo, cd, self.manifest.id, AutoModelForZeroShotObjectDetection)
 
         # Load SAM (ViT-H by default)
         sam_variant = "vit_h"
         log.info("loading SAM checkpoint (%s)...", sam_variant)
-        checkpoint = download_file(SAM_CHECKPOINT_URLS[sam_variant], cd / "checkpoints")
+        checkpoint = download_file(SAM_CHECKPOINT_URLS[sam_variant], cd / "checkpoints" / "samgd")
 
         import warnings
 

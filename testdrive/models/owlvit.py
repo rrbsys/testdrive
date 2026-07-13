@@ -37,6 +37,7 @@ PLUGIN = {
     ],
     "sample_prompt": "orange square",
     "test_threshold": "0.05",
+    "pyenv": "framework",
 }
 
 
@@ -68,8 +69,8 @@ class Plugin(DetectorPlugin):
         repo = self.manifest.hf_repo
         cd = cache_dir()
 
-        self._processor = load_processor(repo, cd)
-        self._model = load_model(repo, cd, AutoModelForZeroShotObjectDetection)
+        self._processor = load_processor(repo, cd, self.manifest.id)
+        self._model = load_model(repo, cd, self.manifest.id, AutoModelForZeroShotObjectDetection)
 
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
         self._model = self._model.to(self._device)

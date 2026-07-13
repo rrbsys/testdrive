@@ -156,16 +156,68 @@ def run_selftest(plugin_id: str, model_override: str | None = None) -> SelfTestR
             result.failures.append(str(exc))
             return result
 
-    # ------------------------------------------------------------------ #
-    # Step 2: dependency check
-    # ------------------------------------------------------------------ #
-    installed, missing = plugin.is_installed()
-    if not installed:
-        note = "missing: " + ", ".join(missing)
-        result.add_step("dependencies", ok=False, note=note)
-        result.failures.append(f"missing packages: {', '.join(missing)}")
-        return result
-    result.add_step("dependencies", ok=True)
+    # Plugins with a non-"framework" pyenv can't be dependency-checked
+    # or initialized in this process — see PluginManifest.pyenv and
+    # cli.py's _run_detect_one, which this mirrors. (This is the actual
+    # fix for a real bug: -T used to skip this branch entirely and
+    # always check/initialize in-process regardless of pyenv, which is
+    # why "testdrive -T yolo11" reported yolo11's dependencies as
+    # missing even though plain detect and -TT — both of which go
+    # through _run_detect_one — worked fine.)
+    uses_worker = plugin.manifest.pyenv != "framework"
+
+    if uses_worker:
+        # ------------------------------------------------------------ #
+        # Steps 2+4 (worker path): a single worker "init" request covers
+        # both the dependency check and initialize() — see
+        # worker_main.py's wire protocol. May also trigger
+        # auto-provisioning this plugin's environment on first use (see
+        # worker_pool._provision_plugin_env).
+        # ------------------------------------------------------------ #
+        from .worker_pool import WorkerError, get_pool
+
+        t0 = time.perf_counter()
+        try:
+            from .cache import cache_dir
+
+            worker = get_pool().get(plugin_id, plugin.manifest.pyenv, cache_dir())
+            worker.init(model_override or None)
+            init_ms = (time.perf_counter() - t0) * 1000
+        except WorkerError as exc:
+            init_ms = (time.perf_counter() - t0) * 1000
+            if exc.kind == "missing_dependency":
+                from .pyenv import install_hint
+
+                note = "missing: " + ", ".join(exc.missing)
+                result.add_step("dependencies", ok=False, note=note)
+                hint = install_hint(cache_dir(), plugin.manifest.pyenv, exc.missing)
+                result.failures.append(
+                    f"missing packages: {', '.join(exc.missing)}\nInstall with:  {hint}"
+                )
+            elif exc.kind == "env_not_configured":
+                result.add_step("environment", ok=False, note=str(exc))
+                result.failures.append(f"environment set up: {exc}")
+            else:
+                result.add_step("initialize", ok=False, note=f"{init_ms:.0f} ms — {exc}")
+                result.failures.append(f"initialize() raised: {exc}")
+            return result
+        result.add_step("dependencies", ok=True)
+        result.add_step("initialize", ok=True, note=f"{init_ms:.0f} ms")
+    else:
+        # ------------------------------------------------------------ #
+        # Step 2: dependency check (in-process)
+        # ------------------------------------------------------------ #
+        installed, missing = plugin.is_installed()
+        if not installed:
+            from .cache import cache_dir
+            from .pyenv import install_hint
+
+            note = "missing: " + ", ".join(missing)
+            result.add_step("dependencies", ok=False, note=note)
+            hint = install_hint(cache_dir(), plugin.manifest.pyenv, missing)
+            result.failures.append(f"missing packages: {', '.join(missing)}\nInstall with:  {hint}")
+            return result
+        result.add_step("dependencies", ok=True)
 
     # ------------------------------------------------------------------ #
     # Step 3: build synthetic test image
@@ -179,19 +231,20 @@ def run_selftest(plugin_id: str, model_override: str | None = None) -> SelfTestR
         result.failures.append(f"could not create test image: {exc}")
         return result
 
-    # ------------------------------------------------------------------ #
-    # Step 4: initialize plugin
-    # ------------------------------------------------------------------ #
-    t0 = time.perf_counter()
-    try:
-        plugin.initialize()
-        init_ms = (time.perf_counter() - t0) * 1000
-        result.add_step("initialize", ok=True, note=f"{init_ms:.0f} ms")
-    except Exception as exc:  # noqa: BLE001
-        init_ms = (time.perf_counter() - t0) * 1000
-        result.add_step("initialize", ok=False, note=str(exc))
-        result.failures.append(f"initialize() raised: {exc}")
-        return result
+    if not uses_worker:
+        # ------------------------------------------------------------ #
+        # Step 4: initialize plugin (in-process)
+        # ------------------------------------------------------------ #
+        t0 = time.perf_counter()
+        try:
+            plugin.initialize()
+            init_ms = (time.perf_counter() - t0) * 1000
+            result.add_step("initialize", ok=True, note=f"{init_ms:.0f} ms")
+        except Exception as exc:  # noqa: BLE001
+            init_ms = (time.perf_counter() - t0) * 1000
+            result.add_step("initialize", ok=False, note=str(exc))
+            result.failures.append(f"initialize() raised: {exc}")
+            return result
 
     # ------------------------------------------------------------------ #
     # Step 5: run detection
@@ -200,14 +253,41 @@ def run_selftest(plugin_id: str, model_override: str | None = None) -> SelfTestR
     log.debug("self-test prompt: %r", prompt)
 
     t0 = time.perf_counter()
-    try:
-        detections = plugin.detect(image, prompt, threshold=0.1)
-        detect_ms = (time.perf_counter() - t0) * 1000
-    except Exception as exc:  # noqa: BLE001
-        detect_ms = (time.perf_counter() - t0) * 1000
-        result.add_step("detect", ok=False, note=str(exc))
-        result.failures.append(f"detect() raised: {exc}")
-        return result
+    if uses_worker:
+        # The worker protocol takes an image *path*, not a PIL Image
+        # (JSON can't carry one) — write the synthetic image out to a
+        # temp file just for this call.
+        import tempfile
+        from pathlib import Path as _Path
+
+        from .worker_pool import WorkerError, get_pool
+
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tf:
+                tmp_path = _Path(tf.name)
+            image.save(tmp_path)
+            try:
+                from .cache import cache_dir
+
+                worker = get_pool().get(plugin_id, plugin.manifest.pyenv, cache_dir())
+                detections = worker.detect(tmp_path, prompt, 0.1, model_override or None)
+            finally:
+                tmp_path.unlink(missing_ok=True)
+            detect_ms = (time.perf_counter() - t0) * 1000
+        except WorkerError as exc:
+            detect_ms = (time.perf_counter() - t0) * 1000
+            result.add_step("detect", ok=False, note=str(exc))
+            result.failures.append(f"detect() raised: {exc}")
+            return result
+    else:
+        try:
+            detections = plugin.detect(image, prompt, threshold=0.1)
+            detect_ms = (time.perf_counter() - t0) * 1000
+        except Exception as exc:  # noqa: BLE001
+            detect_ms = (time.perf_counter() - t0) * 1000
+            result.add_step("detect", ok=False, note=str(exc))
+            result.failures.append(f"detect() raised: {exc}")
+            return result
 
     # ------------------------------------------------------------------ #
     # Step 6: validate return value

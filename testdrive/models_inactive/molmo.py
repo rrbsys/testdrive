@@ -1,11 +1,17 @@
 """Molmo detector plugin — PARKED, not currently discovered.
 
-This lives in ``models/_inactive/`` (see ``pluginloader.
-iter_loadable_plugins`` for why that's invisible to the framework), so
-it is intentionally *not* loaded by the framework right now. Move it
-back to ``models/`` (and fix its relative imports from ``...`` back to
-``..`` — see git history / molmo7b.py's note for why that matters) if
-you want to reactivate it.
+This lives in ``testdrive/models_inactive/`` — a sibling of
+``testdrive/models/``, not a subpackage of it — so its relative
+imports (``..cache``, ``..detection``, etc.) are already at the same
+depth as an active plugin's. It's simply never scanned by
+``pluginloader.iter_loadable_plugins`` (which only looks in
+``models/``), so it's invisible to the framework by default: it won't
+appear in ``-L``/``-M '*'``/etc. It's still directly reachable,
+though — see ``pluginloader.load_plugin``'s handling of paths like
+``../models_inactive/molmo`` — for on-demand use via ``-M``, ``-T``,
+``-TT``, or a normal detect run, without reactivating it for everyone.
+Move the file into ``models/`` instead (no import changes needed) if
+you want it fully reactivated and discoverable.
 
 Points at MolmoE-1B-0924 (mixture-of-experts, ~1B *active* parameters
 per token) rather than the larger dense Molmo-7B-D (parked separately
@@ -31,15 +37,15 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from ...cache import cache_dir
-from ...detection import Detection
-from ...plugin import DetectorPlugin
-from ...util import load_processor, load_model
+from ..cache import cache_dir
+from ..detection import Detection
+from ..plugin import DetectorPlugin
+from ..util import load_processor, load_model
 
 if TYPE_CHECKING:
     from PIL import Image as PILImage
 
-log = logging.getLogger("testdrive.models.molmo")
+log = logging.getLogger("testdrive.models_inactive.molmo")
 
 PLUGIN_API = 1
 
@@ -50,7 +56,7 @@ PLUGIN = {
     "api": PLUGIN_API,
     "description": (
         "Multimodal open-vocabulary detection from AllenAI (mixture-of-experts, "
-        "~1B active params — see models/_inactive/molmo7b.py for the larger dense "
+        "~1B active params — see models_inactive/molmo7b.py for the larger dense "
         "7B variant if you have the hardware for it)."
     ),
     "author": "AllenAI",

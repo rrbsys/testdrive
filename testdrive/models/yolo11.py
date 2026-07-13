@@ -147,6 +147,7 @@ PLUGIN = {
     ],
     "sample_prompt": "person",
     "test_threshold": "default",
+    "pyenv": "newenv",
     "models": ["yolo11n", "yolo11s", "yolo11m", "yolo11l", "yolo11x"],
     "model": "yolo11m",
     "classes": _COCO_80_CLASSES,

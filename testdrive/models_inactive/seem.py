@@ -21,13 +21,13 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from ...detection import Detection
-from ...plugin import DetectorPlugin
+from ..detection import Detection
+from ..plugin import DetectorPlugin
 
 if TYPE_CHECKING:
     from PIL import Image as PILImage
 
-log = logging.getLogger("testdrive.models.seem")
+log = logging.getLogger("testdrive.models_inactive.seem")
 
 PLUGIN_API = 1
 

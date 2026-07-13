@@ -1,29 +1,26 @@
-"""Molmo detector plugin — PARKED, not currently discovered.
+"""Molmo-7B-D detector plugin — PARKED, not currently discovered.
 
-This lives in ``models/_inactive/`` (see ``pluginloader.
-iter_loadable_plugins`` for why that's invisible to the framework), so
-it is intentionally *not* loaded by the framework right now. Move it
-back to ``models/`` (and fix its relative imports from ``...`` back to
-``..`` — see git history / molmo7b.py's note for why that matters) if
-you want to reactivate it.
+This lives in ``testdrive/models_inactive/`` — a sibling of
+``testdrive/models/``, not a subpackage of it — so its relative
+imports are already at the same depth as an active plugin's. It's
+simply never scanned by ``pluginloader.iter_loadable_plugins`` (which
+only looks in ``models/``), so it's invisible to the framework by
+default: it won't appear in ``-L``/``-M '*'``/etc. It's still directly
+reachable, though — see ``pluginloader.load_plugin``'s handling of
+paths like ``../models_inactive/molmo7b`` — for on-demand use via
+``-M``, ``-T``, ``-TT``, or a normal detect run, without reactivating
+it for everyone.
 
-Points at MolmoE-1B-0924 (mixture-of-experts, ~1B *active* parameters
-per token) rather than the larger dense Molmo-7B-D (parked separately
-as ``molmo7b.py``) — chosen on the assumption that fewer active
-parameters would mean a lighter, faster plugin. That assumption was
-wrong in the way that matters most for a CLI tool: MoE models store
-*every* expert on disk regardless of how many activate per token, so
-the download is essentially the same size either way — this "slim"
-1B-active model still downloads ~29GB of fp32 weights.
-
-Concretely: ``-TT molmo`` did eventually **pass** (confirmed on
-real hardware, Wine/macOS) — but took roughly 11 minutes for one
-synthetic-image detection, after an initialize() step that dwarfs that.
-That's not a hard failure, but it's also not something a "try before
-you install anything big" CLI tool should default to running. Parked
-rather than deleted so the option stays available for anyone with the
-patience, a GPU, or a genuine need for Molmo's pointing/counting
-capabilities specifically.
+The dense 7B model here ran *stable* once loaded in bfloat16 (see
+initialize()), but didn't finish a self-test/-TT run within 30 minutes
+on an 8-core CPU. ``models/molmo.py`` (id ``molmo``, distinct from this
+file's ``molmo7b``) points at MolmoE-1B-0924 instead — a
+mixture-of-experts variant that turned out to have basically the same
+~29GB download despite fewer *active* parameters per token, so it's
+also currently parked (see its own docstring). Move this file into
+``models/`` instead (no import changes needed) if you specifically
+want this larger dense model's presumably-better accuracy and have the
+hardware/patience for it.
 """
 
 from __future__ import annotations
@@ -31,33 +28,29 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from ...cache import cache_dir
-from ...detection import Detection
-from ...plugin import DetectorPlugin
-from ...util import load_processor, load_model
+from ..cache import cache_dir
+from ..detection import Detection
+from ..plugin import DetectorPlugin
+from ..util import load_processor, load_model
 
 if TYPE_CHECKING:
     from PIL import Image as PILImage
 
-log = logging.getLogger("testdrive.models.molmo")
+log = logging.getLogger("testdrive.models_inactive.molmo7b")
 
 PLUGIN_API = 1
 
 PLUGIN = {
-    "id": "molmo",
-    "name": "MolmoE",
-    "version": "0.2.0",
+    "id": "molmo7b",
+    "name": "Molmo-7B-D (parked, see module docstring)",
+    "version": "0.1.0",
     "api": PLUGIN_API,
-    "description": (
-        "Multimodal open-vocabulary detection from AllenAI (mixture-of-experts, "
-        "~1B active params — see models/_inactive/molmo7b.py for the larger dense "
-        "7B variant if you have the hardware for it)."
-    ),
+    "description": "Multimodal open-vocabulary detection from AllenAI.",
     "author": "AllenAI",
-    "homepage": "https://huggingface.co/allenai/MolmoE-1B-0924",
+    "homepage": "https://huggingface.co/allenai/Molmo-7B-D-0924",
     "license": "Apache-2.0",
     "backend": "transformers",
-    "hf_repo": "allenai/MolmoE-1B-0924",
+    "hf_repo": "allenai/Molmo-7B-D-0924",
     "task": "multi-modal detection",
     "supports": ["text prompts", "points (approximated as boxes)", "detailed captions"],
     "requirements": [
@@ -125,13 +118,16 @@ class Plugin(DetectorPlugin):
 
         self._device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        # Loading in bfloat16 rather than the default fp32 roughly halves
-        # memory/compute vs. fp32, at the standard small precision-loss
-        # cost — same numeric range as fp32 (unlike float16, no overflow
-        # risk), a reasonable trade for a detection tool. Matters less
-        # here than it did for the dense 7B variant (this MoE model only
-        # activates ~1B params per token to begin with), but there's no
-        # reason not to. GPUs load in their native dtype instead.
+        # Molmo-7B-D's weights are shipped in fp32 (~30GB across 7
+        # shards). On CPU that's both a large resident-memory footprint
+        # and — worse — if it doesn't comfortably fit in RAM, the OS
+        # ends up paging weights from disk on every forward pass during
+        # generation, which is dramatically slower than slow-but-resident
+        # inference. bfloat16 halves that to ~14GB with identical numeric
+        # range to fp32 (unlike float16, no risk of overflow), at the
+        # standard small precision-loss cost — a reasonable trade for a
+        # detection tool. GPUs load in their native dtype since VRAM
+        # paging isn't a concern in the same way.
         dtype = torch.bfloat16 if self._device == "cpu" else "auto"
 
         self._processor = load_processor(repo, cd, self.manifest.id, trust_remote_code=True)
@@ -198,7 +194,9 @@ class Plugin(DetectorPlugin):
                 inputs,
                 # Pointing responses are short — a handful of
                 # <point .../> or <points .../> tags at most — so there's
-                # no reason to budget for 300 tokens.
+                # no reason to budget for 300 tokens (which, on a slow
+                # CPU-bound 7B model, just means waiting a lot longer for
+                # a response that was already finished).
                 GenerationConfig(max_new_tokens=100, stop_strings="<|endoftext|>"),
                 tokenizer=self._processor.tokenizer,
             )

@@ -62,6 +62,81 @@ def set_downloads_allowed(allowed: bool) -> None:
     _downloads_allowed = allowed
 
 
+def get_downloads_allowed() -> bool:
+    """Current value set by set_downloads_allowed() (default True).
+
+    Used by worker_pool.py to propagate this process's setting to a
+    worker subprocess, which doesn't inherit Python module state across
+    the process boundary the way it would if everything ran in one
+    process.
+    """
+    return _downloads_allowed
+
+
+def get_max_parallel_files() -> int | None:
+    """Current value set by set_max_parallel_files() (default None).
+
+    Same propagation purpose as get_downloads_allowed().
+    """
+    return _max_parallel_files
+
+
+# Set via --no-auto-provision on the CLI (see set_auto_provision_enabled
+# below). Defaults to True so library/test usage isn't restricted unless
+# a caller opts out.
+_auto_provision_enabled: bool = True
+
+
+def set_auto_provision_enabled(enabled: bool) -> None:
+    """Control whether a plugin's own (non-"framework") pyenv may be
+    automatically created and pip-installed into on first use.
+
+    Defaults to True. Pass False (``--no-auto-provision`` on the CLI)
+    to require the person to set that environment up by hand instead —
+    e.g. because they want control over exactly what gets installed, or
+    because auto-provisioning failed/misbehaved and they're debugging it
+    manually. Only relevant to plugins that declare a pyenv other than
+    "framework"; has no effect otherwise. Also gated behind
+    get_downloads_allowed() regardless of this setting — provisioning a
+    new environment is the same class of "don't do this by surprise
+    during a plain detect run" action as downloading model weights.
+    """
+    global _auto_provision_enabled
+    _auto_provision_enabled = enabled
+
+
+def get_auto_provision_enabled() -> bool:
+    """Current value set by set_auto_provision_enabled() (default True)."""
+    return _auto_provision_enabled
+
+
+# Set via --pyenv-pip-upgrade/--no-pyenv-pip-upgrade on the CLI (see
+# set_pyenv_pip_upgrade below). Defaults to True.
+_pyenv_pip_upgrade: bool = True
+
+
+def set_pyenv_pip_upgrade(enabled: bool) -> None:
+    """Control whether auto-provisioning a plugin's environment (see
+    worker_pool._provision_plugin_env) upgrades pip in that environment
+    before installing anything else into it.
+
+    Defaults to True: a plugin's dependency list can be substantial
+    (torch, transformers, ...), and an old bundled pip is a common
+    source of install failures (missing wheel support, outdated
+    resolver, etc.) that are confusing to diagnose from a "package X
+    failed to install" error alone. Pass False
+    (``--no-pyenv-pip-upgrade``) to skip this and use whatever pip
+    ``venv`` itself bundled.
+    """
+    global _pyenv_pip_upgrade
+    _pyenv_pip_upgrade = enabled
+
+
+def get_pyenv_pip_upgrade() -> bool:
+    """Current value set by set_pyenv_pip_upgrade() (default True)."""
+    return _pyenv_pip_upgrade
+
+
 class ExitCode:
     """Process exit codes, documented so testdrive scripts/CI nicely."""
 
@@ -73,6 +148,7 @@ class ExitCode:
     IMAGE_UNREADABLE = 5
     OUTPUT_WRITE_FAILED = 6
     LOOP_PARTIAL_FAILURE = 7  # '*' loop mode: at least one plugin in the loop failed
+    PYENV_NOT_CONFIGURED = 8  # not running from cache/pyenv/framework, and it doesn't exist yet
 
 
 def setup_logging(verbosity: int) -> None:
@@ -87,13 +163,18 @@ def setup_logging(verbosity: int) -> None:
     logging.getLogger("testdrive").setLevel(level)
 
 
-def _local_repo_dir(repo: str, cd: Path) -> Path:
-    """Plain, non-symlinked directory a repo snapshot is downloaded into."""
-    safe = repo.replace("/", "__")
-    return cd / "models" / safe
+def _local_repo_dir(plugin_id: str, cd: Path) -> Path:
+    """Plain, non-symlinked directory a repo snapshot is downloaded into
+    — one directory per *plugin*, not per HF repo. A plugin's repo can
+    change (e.g. switching to a different upstream checkpoint) without
+    leaving an orphaned, differently-named cache directory behind, and
+    ``cache/models/<plugin id>/`` is a much more legible layout to
+    browse by hand than a mangled ``org__repo-name`` directory.
+    """
+    return cd / "models" / plugin_id
 
 
-def ensure_local_repo(repo: str, cd: Path) -> Path:
+def ensure_local_repo(repo: str, cd: Path, plugin_id: str) -> Path:
     """Download a full HF repo snapshot into a plain local directory.
 
     ``huggingface_hub``'s default cache stores files as content-addressed
@@ -111,6 +192,9 @@ def ensure_local_repo(repo: str, cd: Path) -> Path:
     independent of the installed ``huggingface_hub``/``transformers``
     version.
 
+    Lands in ``cache/models/<plugin_id>/`` (see ``_local_repo_dir``) —
+    keyed by plugin, not by the HF repo string.
+
     A ``.testdrive_complete`` marker file is written once every file has
     been downloaded, so repeated calls (e.g. once for the processor, once
     for the model) don't re-download anything.
@@ -125,7 +209,7 @@ def ensure_local_repo(repo: str, cd: Path) -> Path:
 
     from huggingface_hub import snapshot_download, list_repo_files
 
-    local_dir = _local_repo_dir(repo, cd)
+    local_dir = _local_repo_dir(plugin_id, cd)
     marker = local_dir / ".testdrive_complete"
     if marker.exists():
         return local_dir
@@ -170,7 +254,11 @@ def ensure_local_repo(repo: str, cd: Path) -> Path:
 
 
 def load_processor(
-    repo: str, cd: Path, processor_class: type[Any] | None = None, **kwargs: Any
+    repo: str,
+    cd: Path,
+    plugin_id: str,
+    processor_class: type[Any] | None = None,
+    **kwargs: Any,
 ) -> Any:
     """Robust processor loader with multiple fallbacks.
 
@@ -186,7 +274,7 @@ def load_processor(
 
     from transformers import AutoProcessor, AutoImageProcessor
 
-    local = ensure_local_repo(repo, cd)
+    local = ensure_local_repo(repo, cd, plugin_id)
 
     attempts: list[tuple[str, Callable[[], Any]]] = []
     if processor_class:
@@ -211,13 +299,13 @@ def load_processor(
     )
 
 
-def load_model(repo: str, cd: Path, model_class: type[Any], **kwargs: Any) -> Any:
+def load_model(repo: str, cd: Path, plugin_id: str, model_class: type[Any], **kwargs: Any) -> Any:
     """Load ``model_class`` from the same plain local snapshot directory
     used by :func:`load_processor`, avoiding the HF hub's symlinked
     snapshot cache (see ``ensure_local_repo``). If :func:`load_processor`
     already downloaded this repo, this reuses that download.
     """
-    local = ensure_local_repo(repo, cd)
+    local = ensure_local_repo(repo, cd, plugin_id)
     return model_class.from_pretrained(local, **kwargs)
 
 
