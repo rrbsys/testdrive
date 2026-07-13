@@ -44,7 +44,7 @@ from . import __version__
 from .annotate import draw_boxes, redact
 from .detection import DetectionResult, PluginManifest
 from .imageio import derive_output_paths, load_image, save_image
-from .pluginloader import PluginLoadError, iter_loadable_plugins, load_plugin
+from .pluginloader import PluginLoadError, display_name, iter_loadable_plugins, load_plugin
 from .util import (
     ExitCode,
     setup_logging,
@@ -784,13 +784,17 @@ def _examples_dir() -> Path:
 
 
 def _find_example_image(plugin_id: str) -> tuple[Path, str, int] | None:
-    """Find ``examples/<plugin_id>/image1-prompt-<slug>-<N>matches.*`` and
-    parse out the prompt and expected match count. Returns
+    """Find ``examples/<name>/image1-prompt-<slug>-<N>matches.*`` and
+    parse out the prompt and expected match count, where ``<name>`` is
+    ``plugin_id``'s :func:`~testdrive.pluginloader.display_name` (the
+    manifest id normally, or the bare basename for an explicit
+    ``../models_inactive/<name>`` reference — never the raw path
+    itself, which isn't a real examples/ subdirectory). Returns
     ``(path, prompt, expected_count)``, or ``None`` if there's no
     examples directory for this plugin, or no file in it matches the
     ``image1-prompt-...-<N>matches.<ext>`` naming convention.
     """
-    plugin_dir = _examples_dir() / plugin_id
+    plugin_dir = _examples_dir() / display_name(plugin_id)
     if not plugin_dir.is_dir():
         return None
 
@@ -848,7 +852,7 @@ def _run_example_test_one(
             "passed": False,
             "error": (
                 f"no usable example for '{plugin_id}': expected "
-                f"examples/{plugin_id}/image1-prompt-<slug>-<N>matches.<ext>"
+                f"examples/{display_name(plugin_id)}/image1-prompt-<slug>-<N>matches.<ext>"
             ),
         }
 

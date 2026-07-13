@@ -193,7 +193,7 @@ def test_list_plugins_backward_compatible():
     # Originally hardcoded to a fixed list (["groundingdino", "owlv2"],
     # then later every plugin that existed at the time) — inherently
     # fragile, since it breaks every time a plugin is added, or
-    # parked/unparked (e.g. into/out of models/_inactive/). What
+    # parked/unparked (e.g. into/out of models_inactive/). What
     # list_plugins() actually promises "backward compatible" behavior
     # for is its *contract*: a sorted, duplicate-free list of plugin id
     # strings matching whatever's currently discoverable — not which
@@ -224,6 +224,81 @@ def test_load_unknown_plugin_raises():
         assert False, "expected PluginLoadError"
     except PluginLoadError:
         pass
+
+
+def test_inactive_plugins_absent_from_discovery():
+    # Parked plugins live in the sibling models_inactive/ package and
+    # must never surface through the normal discovery path — not in
+    # iter_loadable_plugins(), and therefore not in list_plugins() or
+    # any '*' loop built from it (see cli.py).
+    ids = {p.manifest.id for p in iter_loadable_plugins()}
+    assert "molmo" not in ids
+    assert "molmo7b" not in ids
+    assert "seem" not in ids
+    assert "molmo" not in list_plugins()
+
+
+def test_load_plugin_reaches_inactive_plugin_by_explicit_path():
+    loaded = load_plugin("../models_inactive/molmo")
+    assert loaded.manifest.id == "molmo"
+    assert loaded.manifest.name == "MolmoE"
+
+
+def test_load_plugin_inactive_path_accepts_local_os_separator():
+    import os
+
+    # Built with os.path.join rather than hardcoded, so this exercises
+    # whatever separator the OS actually running this test uses —
+    # that's the "os-dependent" part.
+    ref = os.path.join(os.pardir, "models_inactive", "seem")
+    loaded = load_plugin(ref)
+    assert loaded.manifest.id == "seem"
+
+
+def test_load_plugin_inactive_path_unknown_module_raises():
+    try:
+        load_plugin("../models_inactive/does-not-exist")
+        assert False, "expected PluginLoadError"
+    except PluginLoadError:
+        pass
+
+
+def test_load_plugin_plain_id_does_not_match_inactive_shape():
+    # A bare id containing "models_inactive" as text, but not shaped
+    # like the special two-level-up reference, is just an (unknown)
+    # plugin id — never accidentally treated as an inactive-plugin path.
+    try:
+        load_plugin("models_inactive/molmo")
+        assert False, "expected PluginLoadError"
+    except PluginLoadError:
+        pass
+
+
+def test_display_name_resolves_inactive_ref_to_bare_basename():
+    from testdrive.pluginloader import display_name
+
+    assert display_name("../models_inactive/samgd") == "samgd"
+
+
+def test_display_name_passes_through_ordinary_plugin_id():
+    from testdrive.pluginloader import display_name
+
+    assert display_name("owlv2") == "owlv2"
+
+
+def test_cli_find_example_image_resolves_inactive_plugin_path():
+    # Regression test: examples/<name> lookup must use the resolved
+    # basename, not the raw "../models_inactive/samgd" string embedded
+    # verbatim into a path (which would resolve outside examples/
+    # entirely instead of finding examples/samgd/...).
+    import testdrive.cli as cli
+
+    found = cli._find_example_image("../models_inactive/samgd")
+    assert found is not None
+    image_path, prompt, expected = found
+    assert image_path.name == "image1-prompt-green_triangle-1matches.png"
+    assert prompt == "green triangle"
+    assert expected == 1
 
 
 # ---------------------------------------------------------------------------

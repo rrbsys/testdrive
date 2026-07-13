@@ -22,8 +22,19 @@ needs to change.
 | `samgd` | Grounding DINO + SAM | GDINO box, refined to a tight mask-derived box by SAM |
 | `yolo11` | YOLO11 | fixed 80-class COCO vocabulary (not open-vocabulary like the rest — see below), fast, own `pyenv` |
 
-Two plugins are parked in `testdrive/models/_inactive/` (not
-discovered by the framework, so they don't appear in `-L`/`-I`/etc):
+Two plugins are parked in `testdrive/models_inactive/` (a sibling of
+`testdrive/models/`, not a subpackage of it — so its files use the
+same relative-import depth as an active plugin's). They're never
+discovered automatically, so they don't appear in `-L`/`-I`/`-M
+'*'`/`-T '*'`/`-TT '*'`/a bare `'*'` detect run — but each is still directly
+reachable one at a time, from any of `-M`, `-T`, `-TT`, or a normal
+detect run, by passing `../models_inactive/<name>` (or
+`..\models_inactive\<name>` on Windows) in place of a plugin id, e.g.:
+
+```
+testdrive -T ../models_inactive/molmo
+testdrive ../models_inactive/seem photo.jpg "a cat"
+```
 
 - **`seem`** — there is no `transformers`-compatible SEEM model. The
   only HF repo for it ships raw checkpoint files with no

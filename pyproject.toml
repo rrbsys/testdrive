@@ -69,6 +69,12 @@ target-version = "py310"
 python_version = "3.10"
 strict = true
 warn_unused_ignores = true
+# See typestubs/numpy/__init__.pyi for why this is here: it shadows
+# numpy's own bundled stub (which recent releases ship using PEP 695
+# syntax mypy can't parse under python_version = "3.10" — a hard parse
+# error that a mere [[tool.mypy.overrides]] entry can't prevent, since
+# it happens before per-module settings get a chance to apply).
+mypy_path = "$MYPY_CONFIG_FILE_DIR/typestubs"
 
 # None of these ship type stubs (or a py.typed marker) for mypy to find.
 # That's a fact about the libraries, not something this project can fix
@@ -88,6 +94,21 @@ module = [
     "ultralytics.*",
 ]
 ignore_missing_imports = true
+
+# The shadow stub at typestubs/numpy/__init__.pyi (see mypy_path above
+# and that file's own docstring) handles a bare `import numpy`, but
+# numpy also has internal submodules (e.g. numpy._typing, pulled in
+# transitively by other packages' own stubs) that aren't covered by
+# that single stub file, and which mypy would otherwise still resolve
+# from the real installed numpy. Some of those are regular .py source
+# using PEP 695 syntax too (not just numpy's __init__.pyi) — and unlike
+# that case, follow_imports = "skip" *does* apply here, since (per
+# mypy's own docs) it only affects .py source files, never .pyi stubs,
+# which is exactly why it didn't stop the __init__.pyi crash on its own
+# before the shadow stub existed.
+[[tool.mypy.overrides]]
+module = "numpy.*"
+follow_imports = "skip"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
