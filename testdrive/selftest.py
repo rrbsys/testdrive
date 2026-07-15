@@ -180,7 +180,7 @@ def run_selftest(plugin_id: str, model_override: str | None = None) -> SelfTestR
         try:
             from .cache import cache_dir
 
-            worker = get_pool().get(plugin_id, plugin.manifest.pyenv, cache_dir())
+            worker = get_pool().get(plugin_id, plugin.manifest.id, plugin.manifest.pyenv, cache_dir())
             worker.init(model_override or None)
             init_ms = (time.perf_counter() - t0) * 1000
         except WorkerError as exc:
@@ -267,7 +267,7 @@ def run_selftest(plugin_id: str, model_override: str | None = None) -> SelfTestR
             try:
                 from .cache import cache_dir
 
-                worker = get_pool().get(plugin_id, plugin.manifest.pyenv, cache_dir())
+                worker = get_pool().get(plugin_id, plugin.manifest.id, plugin.manifest.pyenv, cache_dir())
                 detections = worker.detect(tmp_path, prompt, 0.1, model_override or None)
             finally:
                 tmp_path.unlink(missing_ok=True)

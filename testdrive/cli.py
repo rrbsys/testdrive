@@ -518,7 +518,7 @@ def _run_detect_one(
         from .worker_pool import WorkerError, get_pool
 
         try:
-            worker = get_pool().get(plugin_id, plugin.manifest.pyenv, cache_dir())
+            worker = get_pool().get(plugin_id, plugin.manifest.id, plugin.manifest.pyenv, cache_dir())
             log.info(
                 "running detection via '%s' worker: prompt=%r threshold=%.2f",
                 plugin.manifest.pyenv, prompt, threshold,

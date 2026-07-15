@@ -148,10 +148,19 @@ def _provision_plugin_env(plugin_id: str, pyenv_name: str, env_directory: Path, 
 class WorkerHandle:
     """One live worker subprocess for one plugin."""
 
-    def __init__(self, plugin_id: str, python_path: Path):
+    def __init__(self, plugin_ref: str, python_path: Path):
         from .util import get_downloads_allowed, get_max_parallel_files
 
-        self.plugin_id = plugin_id
+        # plugin_ref is what gets passed to worker_main.py's own
+        # load_plugin() call in the child process — for a parked
+        # models_inactive/ plugin that must be the original
+        # "../models_inactive/<name>"-shaped reference, not the clean
+        # manifest id, since load_plugin() only resolves *that* id
+        # shape for parked plugins (see pluginloader._parse_inactive_ref).
+        # Everything else (pool dict key, pip extras name during
+        # provisioning) uses the clean manifest id instead — see
+        # WorkerPool.get.
+        self.plugin_id = plugin_ref
 
         env = os.environ.copy()
         env["TESTDRIVE_WORKER_DOWNLOADS_ALLOWED"] = "1" if get_downloads_allowed() else "0"
@@ -159,7 +168,7 @@ class WorkerHandle:
         env["TESTDRIVE_WORKER_MAX_PARALLEL_FILES"] = str(max_parallel) if max_parallel is not None else ""
 
         self._proc = subprocess.Popen(
-            [str(python_path), "-m", "testdrive.worker_main", plugin_id],
+            [str(python_path), "-m", "testdrive.worker_main", plugin_ref],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=None,  # inherit — worker-side logging/tracebacks stay visible directly
@@ -258,7 +267,18 @@ class WorkerPool:
     def __init__(self) -> None:
         self._workers: dict[str, WorkerHandle] = {}
 
-    def get(self, plugin_id: str, pyenv_name: str, cd: Path) -> WorkerHandle:
+    def get(self, plugin_ref: str, plugin_id: str, pyenv_name: str, cd: Path) -> WorkerHandle:
+        """*plugin_ref* is the original CLI-facing reference (e.g.
+        ``"../models_inactive/seem"`` for a parked plugin, or just
+        ``"seem"`` for a normal one) — passed through to the worker
+        subprocess, which needs that exact shape to resolve a parked
+        plugin via its own load_plugin() call (see
+        pluginloader._parse_inactive_ref). *plugin_id* is the clean
+        manifest id (e.g. ``"seem"``) — used to key this pool and, for
+        provisioning, must match the extras group name declared in
+        pyproject.toml (see _provision_plugin_env's pip install
+        command), which a messy path-shaped ref cannot.
+        """
         if plugin_id not in self._workers:
             from .pyenv import env_dir, env_python_path
             from .util import get_auto_provision_enabled, get_downloads_allowed
@@ -274,7 +294,7 @@ class WorkerPool:
                     raise WorkerError(
                         "env_not_configured",
                         f"plugin '{plugin_id}' needs its '{pyenv_name}' environment set up "
-                        f"first. Run `testdrive -T {plugin_id}` (or -TT {plugin_id}) once to "
+                        f"first. Run `testdrive -T {plugin_ref}` (or -TT {plugin_ref}) once to "
                         f"set it up automatically, then re-run this command.",
                     )
                 if not get_auto_provision_enabled():
@@ -295,7 +315,7 @@ class WorkerPool:
                         f"set up '{pyenv_name}' for plugin '{plugin_id}' but the expected "
                         f"interpreter still isn't there ({python_path})",
                     )
-            self._workers[plugin_id] = WorkerHandle(plugin_id, python_path)
+            self._workers[plugin_id] = WorkerHandle(plugin_ref, python_path)
         return self._workers[plugin_id]
 
     def shutdown_all(self) -> None:

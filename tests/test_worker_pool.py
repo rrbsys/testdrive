@@ -189,7 +189,7 @@ def test_pool_get_raises_when_downloads_not_allowed():
         try:
             pool = WorkerPool()
             try:
-                pool.get("yolo11", "newenv", cd)
+                pool.get("yolo11", "yolo11", "newenv", cd)
                 assert False, "expected WorkerError"
             except WorkerError as exc:
                 assert exc.kind == "env_not_configured"
@@ -209,7 +209,7 @@ def test_pool_get_raises_when_auto_provision_disabled():
         try:
             pool = WorkerPool()
             try:
-                pool.get("yolo11", "newenv", cd)
+                pool.get("yolo11", "yolo11", "newenv", cd)
                 assert False, "expected WorkerError"
             except WorkerError as exc:
                 assert exc.kind == "env_not_configured"
@@ -240,10 +240,12 @@ def test_pool_get_provisions_then_spawns_worker():
         provision_target = "testdrive.worker_pool._provision_plugin_env"
         handle_target = "testdrive.worker_pool.WorkerHandle"
         with mock.patch(provision_target, side_effect=fake_provision), \
-             mock.patch(handle_target, return_value=fake_handle):
+             mock.patch(handle_target, return_value=fake_handle) as mock_handle:
             pool = WorkerPool()
-            handle = pool.get("yolo11", "newenv", cd)
+            handle = pool.get("yolo11", "yolo11", "newenv", cd)
 
+        # Provisioning (pip extras name, message text) uses the clean
+        # manifest id, not any path-shaped ref.
         assert provisioned["called"] == ("yolo11", "newenv")
         assert handle is fake_handle
         # Second call for the same plugin reuses the cached handle —
@@ -252,7 +254,51 @@ def test_pool_get_provisions_then_spawns_worker():
             "testdrive.worker_pool._provision_plugin_env",
             side_effect=AssertionError("must not provision twice"),
         ):
-            assert pool.get("yolo11", "newenv", cd) is fake_handle
+            assert pool.get("yolo11", "yolo11", "newenv", cd) is fake_handle
+
+
+def test_pool_get_spawns_worker_with_raw_ref_not_manifest_id():
+    """Regression test: a parked plugin is invoked via a path-shaped ref
+    (e.g. "../models_inactive/seem") whose clean manifest id is just
+    "seem". Provisioning (pip extras, pool key) must use the clean id —
+    "seem" is the extras group name in pyproject.toml, and
+    ".[../models_inactive/seem]" isn't valid PEP 508 syntax — but the
+    worker subprocess must still be spawned with the *original ref*,
+    since worker_main.py's own load_plugin() call only resolves parked
+    plugins by that exact path shape (see
+    pluginloader._parse_inactive_ref), not by their bare manifest id.
+    """
+    from testdrive.util import set_auto_provision_enabled, set_downloads_allowed
+    from testdrive.worker_pool import WorkerPool
+
+    with tempfile.TemporaryDirectory() as td:
+        cd = Path(td)
+        set_downloads_allowed(True)
+        set_auto_provision_enabled(True)
+
+        provisioned = {}
+
+        def fake_provision(plugin_id, pyenv_name, env_directory, python_path):
+            provisioned["called"] = (plugin_id, pyenv_name)
+            python_path.parent.mkdir(parents=True, exist_ok=True)
+            python_path.touch()
+
+        fake_handle = object()
+
+        with mock.patch("testdrive.worker_pool._provision_plugin_env", side_effect=fake_provision), \
+             mock.patch("testdrive.worker_pool.WorkerHandle", return_value=fake_handle) as mock_handle:
+            pool = WorkerPool()
+            handle = pool.get("../models_inactive/seem", "seem", "seem", cd)
+
+        # Provisioning/pip-extras uses the clean id ("seem"), never the path.
+        assert provisioned["called"] == ("seem", "seem")
+        # But WorkerHandle (which spawns "python -m testdrive.worker_main
+        # <ref>") gets the original path-shaped ref, not the bare id —
+        # that's what a parked plugin's own load_plugin() call needs.
+        mock_handle.assert_called_once()
+        spawn_ref = mock_handle.call_args[0][0]
+        assert spawn_ref == "../models_inactive/seem"
+        assert handle is fake_handle
 
 
 # ---------------------------------------------------------------------------
