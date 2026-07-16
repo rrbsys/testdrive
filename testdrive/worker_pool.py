@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .detection import Detection
+    from .detection import Detection, PluginManifest
 
 log = logging.getLogger("testdrive.worker_pool")
 
@@ -59,7 +59,15 @@ def _provision_marker_path(env_directory: Path) -> Path:
     return env_directory / ".testdrive_plugin_ok"
 
 
-def _provision_plugin_env(plugin_id: str, pyenv_name: str, env_directory: Path, python_path: Path) -> None:
+def _provision_plugin_env(
+    plugin_id: str,
+    pyenv_name: str,
+    env_directory: Path,
+    python_path: Path,
+    requirements: list[str],
+    pip_options: str,
+    patches: list[dict[str, str]],
+) -> None:
     """Automatically create and set up a plugin's own environment.
 
     Unlike the framework's own environment (which the user must set up
@@ -70,10 +78,15 @@ def _provision_plugin_env(plugin_id: str, pyenv_name: str, env_directory: Path, 
     interpreter (already confirmed to be a working, correct-version
     Python — see pyenv.ensure_framework_env), optionally upgrade pip in
     it (see get_pyenv_pip_upgrade — on by default; an old bundled pip is
-    a common, confusing source of install failures), then pip install
-    testdrive itself plus this plugin's extra into it. No manual
-    `python -m venv` / `pip install` steps for the user, unlike the
-    framework env.
+    a common, confusing source of install failures), install testdrive
+    itself into it (still needed here even though the plugin's own
+    dependencies are handled separately below — the worker subprocess
+    spawned into this environment needs to `import testdrive` itself,
+    see worker_main.py), then this plugin's own *requirements* (see
+    PluginManifest.requirements/pip_options/patches — pip strings with
+    real version pins baked in, not a package-manager-agnostic "extra"
+    name) via pyenv.run_pip_install. No manual `python -m venv` /
+    `pip install` steps for the user, unlike the framework env.
 
     Progress is printed unconditionally (not gated behind -v/log level)
     — this can take a genuinely long time (multi-GB dependencies like
@@ -88,12 +101,15 @@ def _provision_plugin_env(plugin_id: str, pyenv_name: str, env_directory: Path, 
     completed here specifically, for diagnostics.
 
     Raises WorkerError (kind="error") on any failure, wrapping
-    whatever subprocess.CalledProcessError/OSError occurred so callers
-    don't need to know this is implemented via subprocess.
+    whatever subprocess.CalledProcessError/OSError/RuntimeError
+    occurred so callers don't need to know this is implemented via
+    subprocess (and, for a plugin with source patches, direct file
+    edits too — see pyenv.apply_source_patches).
     """
     import subprocess
     import sys
 
+    from .pyenv import run_pip_install
     from .util import get_pyenv_pip_upgrade
 
     def _announce(msg: str) -> None:
@@ -107,32 +123,28 @@ def _provision_plugin_env(plugin_id: str, pyenv_name: str, env_directory: Path, 
             check=True, capture_output=True, text=True,
         )
 
-        pip_path = env_directory / ("Scripts" if os.name == "nt" else "bin") / ("pip.exe" if os.name == "nt" else "pip")
-
         if get_pyenv_pip_upgrade():
-            _announce(f"installing via {pip_path} install --upgrade pip")
+            _announce(f"installing via {python_path} -m pip install --upgrade pip")
             subprocess.run(
                 [str(python_path), "-m", "pip", "install", "--upgrade", "pip"],
                 check=True, capture_output=True, text=True,
             )
 
         project_root = _project_root()
-        _announce(f"installing via {pip_path} -e . -e .[{plugin_id}]  (this may take a while)")
+        _announce(f"installing via {python_path} -m pip install -e {project_root}")
         subprocess.run(
-            [
-                str(python_path), "-m", "pip", "install",
-                "-e", str(project_root),
-                "-e", f"{project_root}[{plugin_id}]",
-            ],
+            [str(python_path), "-m", "pip", "install", "-e", str(project_root)],
             check=True, capture_output=True, text=True,
         )
+
+        run_pip_install(python_path, requirements, pip_options, patches, announce=_announce)
     except subprocess.CalledProcessError as exc:
         raise WorkerError(
             "error",
             f"could not set up '{pyenv_name}' environment for plugin '{plugin_id}': "
             f"{exc.cmd} exited {exc.returncode}\n{exc.stderr}",
         ) from exc
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
         raise WorkerError(
             "error", f"could not set up '{pyenv_name}' environment for plugin '{plugin_id}': {exc}",
         ) from exc
@@ -267,20 +279,23 @@ class WorkerPool:
     def __init__(self) -> None:
         self._workers: dict[str, WorkerHandle] = {}
 
-    def get(self, plugin_ref: str, plugin_id: str, pyenv_name: str, cd: Path) -> WorkerHandle:
+    def get(self, plugin_ref: str, manifest: "PluginManifest", cd: Path) -> WorkerHandle:
         """*plugin_ref* is the original CLI-facing reference (e.g.
         ``"../models_inactive/seem"`` for a parked plugin, or just
         ``"seem"`` for a normal one) — passed through to the worker
         subprocess, which needs that exact shape to resolve a parked
         plugin via its own load_plugin() call (see
-        pluginloader._parse_inactive_ref). *plugin_id* is the clean
-        manifest id (e.g. ``"seem"``) — used to key this pool and, for
-        provisioning, must match the extras group name declared in
-        pyproject.toml (see _provision_plugin_env's pip install
-        command), which a messy path-shaped ref cannot.
+        pluginloader._parse_inactive_ref). *manifest* is the plugin's
+        own manifest — its clean ``id`` keys this pool (a messy
+        path-shaped ref can't), and its ``requirements``/
+        ``pip_options``/``patches`` are what auto-provisioning actually
+        installs (see _provision_plugin_env), replacing the old
+        pyproject.toml-extras-name mechanism.
         """
+        plugin_id = manifest.id
+        pyenv_name = manifest.pyenv
         if plugin_id not in self._workers:
-            from .pyenv import env_dir, env_python_path
+            from .pyenv import env_dir, env_python_path, install_hint
             from .util import get_auto_provision_enabled, get_downloads_allowed
 
             python_path = env_python_path(cd, pyenv_name)
@@ -297,18 +312,24 @@ class WorkerPool:
                         f"first. Run `testdrive -T {plugin_ref}` (or -TT {plugin_ref}) once to "
                         f"set it up automatically, then re-run this command.",
                     )
+                requirements = [req["pip"] for req in manifest.requirements]
                 if not get_auto_provision_enabled():
                     # --no-auto-provision: set up by hand instead, same
                     # instructions the framework's own environment needs.
                     env_directory = env_dir(cd, pyenv_name)
+                    hint = install_hint(cd, pyenv_name, requirements, manifest.pip_options)
                     raise WorkerError(
                         "env_not_configured",
                         f"plugin '{plugin_id}' needs its '{pyenv_name}' environment set up, "
                         f"but --no-auto-provision was given. Set it up by hand:\n"
                         f'    python3 -m venv "{env_directory}"\n'
-                        f'    "{python_path}" -m pip install -e . -e ".[{plugin_id}]"',
+                        f'    "{python_path}" -m pip install -e ."\n'
+                        f"    {hint}",
                     )
-                _provision_plugin_env(plugin_id, pyenv_name, env_dir(cd, pyenv_name), python_path)
+                _provision_plugin_env(
+                    plugin_id, pyenv_name, env_dir(cd, pyenv_name), python_path,
+                    requirements, manifest.pip_options, manifest.patches,
+                )
                 if not python_path.exists():  # pragma: no cover — defensive
                     raise WorkerError(
                         "error",

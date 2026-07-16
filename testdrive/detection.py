@@ -116,7 +116,39 @@ class PluginManifest:
     task: str = ""
 
     supports: list[str] = field(default_factory=list)
+
+    #: Each entry: {"pip": <pip install argument>, "module": <import
+    #: name to probe for is_installed()>}. "pip" now carries the real,
+    #: exact version pin this plugin needs (e.g. "torch==2.0.0", or a
+    #: "name @ git+https://..." VCS reference) — not just a bare
+    #: package name — since it doubles as this plugin's actual
+    #: auto-provisioning install list (see pyenv.run_pip_install,
+    #: worker_pool._provision_plugin_env, and selftest.py's
+    #: framework-pyenv auto-provision branch), not just something
+    #: shown in a "missing dependency" hint message.
     requirements: list[dict[str, str]] = field(default_factory=list)
+
+    #: Extra flags appended to every pip install command run for this
+    #: plugin's requirements (auto-provisioning or the manual
+    #: --no-auto-provision hint alike) — e.g. "--no-build-isolation"
+    #: for a plugin whose build needs the current environment rather
+    #: than pip's normal isolated build env (see seem.py, whose old
+    #: GPU-only dependency chain needs this). Empty string (the
+    #: default) adds nothing.
+    pip_options: str = ""
+
+    #: Source patches to apply mid-provisioning, after installing every
+    #: non-VCS entry in ``requirements`` but before any "name @ git+..."
+    #: entry (which is exactly the ordering a plugin like seem needs:
+    #: patch an already-installed dependency's vendored header *before*
+    #: building something from source against it). Each entry:
+    #: {"target": <path relative to the environment's site-packages,
+    #: e.g. "torch/include/c10/util/foo.h">, "find": <exact text to
+    #: replace, must appear exactly once>, "replace": <replacement
+    #: text>}. Idempotent — if "find" is already gone and "replace" is
+    #: already present, re-provisioning is a safe no-op rather than an
+    #: error. See pyenv.apply_source_patches.
+    patches: list[dict[str, str]] = field(default_factory=list)
 
     sample_prompt: str = ""
 

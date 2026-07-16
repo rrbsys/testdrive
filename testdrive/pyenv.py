@@ -33,6 +33,10 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 log = logging.getLogger("testdrive.pyenv")
 
@@ -92,16 +96,134 @@ def env_pip_path(cd: Path, name: str = FRAMEWORK_ENV_NAME) -> Path:
     return d / "bin" / "pip"
 
 
-def install_hint(cd: Path, name: str, packages: list[str]) -> str:
+def install_hint(cd: Path, name: str, packages: list[str], pip_options: str = "") -> str:
     """A single, copy-pasteable command to install ``packages`` into the
     named environment — the full OS-correct path to that environment's
     own pip, not just a bare ``pip install ...`` (which would silently
     run against whatever pip happens to be on PATH, not necessarily the
-    right environment at all).
+    right environment at all). *pip_options* (see
+    ``PluginManifest.pip_options``) is inserted before the package
+    list, exactly as ``run_pip_install`` below would use it — e.g.
+    ``--no-build-isolation`` for a plugin whose build needs it.
     """
     pip = env_pip_path(cd, name)
+    opts = f"{pip_options} " if pip_options else ""
     pkgs = " ".join(f'"{p}"' for p in packages)
-    return f'"{pip}" install {pkgs}'
+    return f'"{pip}" install {opts}{pkgs}'
+
+
+def run_pip_install(
+    python_path: Path,
+    requirements: list[str],
+    pip_options: str = "",
+    patches: list[dict[str, str]] | None = None,
+    announce: "Callable[[str], None] | None" = None,
+) -> None:
+    """Install *requirements* (already-formatted pip arguments, e.g.
+    ``"torch==2.0.0"`` or ``"name @ git+https://..."``) into the
+    environment at *python_path* — this is the one place that actually
+    runs the pip command a plugin's own manifest describes (see
+    ``PluginManifest.requirements``/``pip_options``/``patches``), used
+    both for a plugin with its own dedicated pyenv (see
+    ``worker_pool._provision_plugin_env``) and for a "framework"-pyenv
+    plugin being auto-provisioned directly into the shared framework
+    environment (see ``selftest.py``).
+
+    *patches* (see ``PluginManifest.patches``) are applied — via
+    ``apply_source_patches`` below — after installing every non-VCS
+    entry in *requirements* but before any ``"... @ git+..."`` entry:
+    the ordering a plugin like seem needs (patch an already-installed
+    dependency's vendored header before building something else from
+    source against it), and the reason this doesn't just run a single
+    ``pip install`` covering everything at once even when *patches* is
+    empty and there's nothing to split for.
+
+    Raises ``subprocess.CalledProcessError`` (pip itself failed) or
+    ``RuntimeError`` (a patch's target file is missing, or its "find"
+    text doesn't appear exactly once — see ``apply_source_patches``).
+    Callers translate either into their own error type with more
+    context (``WorkerError``, etc.) — this function only runs the
+    commands.
+    """
+    import shlex
+    import subprocess
+
+    _announce = announce or (lambda _msg: None)
+    patches = patches or []
+
+    extra_args = shlex.split(pip_options) if pip_options else []
+    vcs_reqs = [r for r in requirements if " @ git+" in r or r.startswith("git+")]
+    normal_reqs = [r for r in requirements if r not in vcs_reqs]
+
+    def _pip_install(pkgs: list[str]) -> None:
+        if not pkgs:
+            return
+        cmd = [str(python_path), "-m", "pip", "install", *extra_args, *pkgs]
+        _announce(f"installing via {' '.join(cmd)}  (this may take a while)")
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+    _pip_install(normal_reqs)
+    if patches:
+        apply_source_patches(python_path, patches, announce=_announce)
+    _pip_install(vcs_reqs)
+
+
+def apply_source_patches(
+    python_path: Path,
+    patches: list[dict[str, str]],
+    announce: "Callable[[str], None] | None" = None,
+) -> None:
+    """Apply ``PluginManifest.patches``-shaped patches to the environment
+    at *python_path*.
+
+    Resolves *that* environment's own site-packages directory by
+    running a one-liner inside it (not this process's own
+    ``sysconfig`` — a plugin's dedicated pyenv is very often a
+    different Python version/layout entirely than the framework's),
+    then for each patch: if "replace" is already present in the target
+    file, treats it as already applied and moves on — provisioning
+    stays safe to re-run against an already-patched environment.
+    Otherwise requires "find" to appear in the target file exactly
+    once (same safety property this project's own development process
+    already relies on for editing *this* source tree) before
+    substituting it for "replace".
+
+    Raises ``RuntimeError`` if a target file doesn't exist, or "find"
+    doesn't appear exactly once and "replace" isn't already present
+    either — most likely an unexpected dependency version this patch
+    was never written against.
+    """
+    import subprocess
+
+    _announce = announce or (lambda _msg: None)
+    if not patches:
+        return
+
+    site_packages = Path(
+        subprocess.run(
+            [str(python_path), "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+    )
+
+    for patch in patches:
+        target = site_packages / patch["target"]
+        find, replace = patch["find"], patch["replace"]
+        _announce(f"patching {target} ...")
+        if not target.exists():
+            raise RuntimeError(f"patch target does not exist: {target}")
+        text = target.read_text()
+        if replace in text and find not in text:
+            continue  # already applied — safe to re-run provisioning
+        count = text.count(find)
+        if count != 1:
+            raise RuntimeError(
+                f"patch target {target}: expected the patch's 'find' text to "
+                f"appear exactly once, found {count} instead — the installed "
+                f"dependency version likely doesn't match what this patch was "
+                f"written against"
+            )
+        target.write_text(text.replace(find, replace))
 
 
 def is_in_env(cd: Path, name: str = FRAMEWORK_ENV_NAME) -> bool:

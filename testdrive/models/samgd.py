@@ -41,9 +41,9 @@ PLUGIN = {
     "supports": ["text prompts", "boxes", "masks"],
     "requirements": [
         {"pip": "Pillow", "module": "PIL"},
-        {"pip": "torch", "module": "torch"},
+        {"pip": "torch>=2.2", "module": "torch"},
         {"pip": "numpy", "module": "numpy"},
-        {"pip": "transformers", "module": "transformers"},
+        {"pip": "transformers==4.50.3", "module": "transformers"},
         {"pip": "segment-anything", "module": "segment_anything"},
     ],
     "sample_prompt": "green triangle",

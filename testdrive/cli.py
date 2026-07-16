@@ -492,7 +492,7 @@ def _run_detect_one(
                 f"plugin '{plugin_id}' is missing dependencies:\n    "
                 + "\n    ".join(missing)
                 + "\n\nInstall with:  "
-                + install_hint(cache_dir(), plugin.manifest.pyenv, missing)
+                + install_hint(cache_dir(), plugin.manifest.pyenv, missing, plugin.manifest.pip_options)
             )
             return ExitCode.MISSING_DEPENDENCY, None, msg
 
@@ -518,7 +518,7 @@ def _run_detect_one(
         from .worker_pool import WorkerError, get_pool
 
         try:
-            worker = get_pool().get(plugin_id, plugin.manifest.id, plugin.manifest.pyenv, cache_dir())
+            worker = get_pool().get(plugin_id, plugin.manifest, cache_dir())
             log.info(
                 "running detection via '%s' worker: prompt=%r threshold=%.2f",
                 plugin.manifest.pyenv, prompt, threshold,
@@ -535,7 +535,7 @@ def _run_detect_one(
                     f"'{plugin.manifest.pyenv}' environment:\n    "
                     + "\n    ".join(exc.missing)
                     + "\n\nInstall with:  "
-                    + install_hint(cache_dir(), plugin.manifest.pyenv, exc.missing)
+                    + install_hint(cache_dir(), plugin.manifest.pyenv, exc.missing, plugin.manifest.pip_options)
                 )
                 return ExitCode.MISSING_DEPENDENCY, None, msg
             if exc.kind == "cache_not_populated":

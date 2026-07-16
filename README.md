@@ -118,9 +118,14 @@ the first time it's actually needed (`-T`/`-TT`; same "don't do this
 by surprise during a plain detect run" discipline as model downloads —
 see Cache discipline below), running `python -m venv`, an optional
 `pip install --upgrade pip` first, then installing testdrive itself
-plus that plugin's own extra into it. Progress is printed as it
-happens (this can take a while — torch-class dependencies aren't
-small). Two flags control this:
+plus that plugin's own pinned requirements (`PLUGIN["requirements"]`
+in its manifest — real version pins, not just bare package names) into
+it, applying any `pip_options` (e.g. `--no-build-isolation`) and
+source `patches` (see `testdrive/models_inactive/seem.py` for a plugin
+using both, and `PluginManifest`/`pyenv.run_pip_install` for exactly
+what these do and when they run) it declares along the way. Progress
+is printed as it happens (this can take a while — torch-class
+dependencies aren't small). Two flags control this:
 
 - `--no-auto-provision` — set the environment up by hand instead (same
   3-step shape as the framework env, minus step 1 — see the error
@@ -151,16 +156,24 @@ git clone https://github.com/<you>/testdrive.git
 cd testdrive
 pip install -e .
 
-# Install backend deps for the plugin(s) you want to run:
-pip install -e ".[owlv2]"          # one plugin
-pip install -e ".[owlv2,owlvit]"   # a few
-pip install -e ".[all]"            # every active plugin
+# Install backend deps for the plugin(s) you want to run — testdrive
+# does this itself now (see "Plugin environments" above), whether a
+# plugin shares the framework's own environment or has its own
+# dedicated one:
+testdrive -T owlv2      # one plugin
+testdrive -T '*'        # every active plugin at once
 ```
 
-`transformers` is pinned to exactly `4.50.3` in every extra — every
-later release we've tried introduces a regression that pulls in a
-TensorFlow dependency chain, which then breaks these plugins. Revisit
-this once that's fixed upstream.
+Each plugin's own pinned dependency versions (`transformers==4.50.3` for
+most of them, currently — every later release we've tried introduces a
+regression that pulls in a TensorFlow dependency chain, which then
+breaks these plugins; revisit this once that's fixed upstream) live in
+that plugin's own manifest (`PLUGIN["requirements"]` — see e.g.
+`testdrive/models/owlv2.py`) now, not in a hand-maintained
+`pyproject.toml` extras group — see "Plugin environments" above for
+why a plain extras group couldn't express this for every plugin
+anyway (a `pip_options` flag like SEEM's `--no-build-isolation`, or an
+ordered source patch — see `testdrive/models_inactive/seem.py`).
 
 **The core framework needs only `Pillow`.** `-L`, `-I`, `-M` (including
 `-M --json`) all work with nothing else installed — verified by running

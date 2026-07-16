@@ -66,11 +66,14 @@ def test_provision_plugin_env_runs_venv_then_pip_upgrade_then_installs():
         set_pyenv_pip_upgrade(True)
         try:
             with mock.patch("subprocess.run", side_effect=fake_run):
-                _provision_plugin_env("yolo11", "newenv", env_dir, python_path)
+                _provision_plugin_env(
+                    "yolo11", "newenv", env_dir, python_path,
+                    ["torch>=2.2", "ultralytics>=8.3"], "", [],
+                )
         finally:
             set_pyenv_pip_upgrade(True)  # restore default
 
-        assert len(calls) == 3
+        assert len(calls) == 4
         # 1) venv creation, using *this* interpreter
         assert calls[0][:3] == [sys.executable, "-m", "venv"]
         assert calls[0][3] == str(env_dir)
@@ -79,10 +82,17 @@ def test_provision_plugin_env_runs_venv_then_pip_upgrade_then_installs():
         assert calls[1][1:4] == ["-m", "pip", "install"]
         assert "--upgrade" in calls[1]
         assert "pip" in calls[1]
-        # 3) editable install of the core package + this plugin's extra
+        # 3) editable install of the core package itself (needed so the
+        # worker subprocess spawned into this env can `import testdrive`)
         assert calls[2][0] == str(python_path)
         assert "-e" in calls[2]
-        assert any(a.endswith("[yolo11]") for a in calls[2])
+        # 4) this plugin's own pinned requirements — no more pyproject
+        # extras name, real pip-installable strings straight from its
+        # manifest
+        assert calls[3][0] == str(python_path)
+        assert calls[3][1:4] == ["-m", "pip", "install"]
+        assert "torch>=2.2" in calls[3]
+        assert "ultralytics>=8.3" in calls[3]
 
         assert _provision_marker_path(env_dir).exists()
         assert "yolo11" in _provision_marker_path(env_dir).read_text()
@@ -105,14 +115,16 @@ def test_provision_plugin_env_skips_pip_upgrade_when_disabled():
         set_pyenv_pip_upgrade(False)
         try:
             with mock.patch("subprocess.run", side_effect=fake_run):
-                _provision_plugin_env("yolo11", "newenv", env_dir, python_path)
+                _provision_plugin_env("yolo11", "newenv", env_dir, python_path, ["ultralytics>=8.3"], "", [])
         finally:
             set_pyenv_pip_upgrade(True)
 
-        # Just venv creation + the editable install — no pip-upgrade call.
-        assert len(calls) == 2
+        # venv creation + editable install + requirements install — no
+        # pip-upgrade call.
+        assert len(calls) == 3
         assert calls[0][:3] == [sys.executable, "-m", "venv"]
         assert "-e" in calls[1]
+        assert "ultralytics>=8.3" in calls[2]
 
 
 def test_provision_plugin_env_wraps_called_process_error():
@@ -127,7 +139,7 @@ def test_provision_plugin_env_wraps_called_process_error():
 
         try:
             with mock.patch("subprocess.run", side_effect=fake_run):
-                _provision_plugin_env("yolo11", "newenv", env_dir, python_path)
+                _provision_plugin_env("yolo11", "newenv", env_dir, python_path, [], "", [])
             assert False, "expected WorkerError"
         except WorkerError as exc:
             assert exc.kind == "error"
@@ -146,7 +158,7 @@ def test_provision_plugin_env_wraps_oserror():
 
         try:
             with mock.patch("subprocess.run", side_effect=fake_run):
-                _provision_plugin_env("yolo11", "newenv", env_dir, python_path)
+                _provision_plugin_env("yolo11", "newenv", env_dir, python_path, [], "", [])
             assert False, "expected WorkerError"
         except WorkerError as exc:
             assert exc.kind == "error"
@@ -171,7 +183,7 @@ def test_provision_plugin_env_marker_write_failure_is_non_fatal():
 
         with mock.patch("subprocess.run", side_effect=fake_run), \
              mock.patch.object(Path, "write_text", fake_write_text):
-            _provision_plugin_env("yolo11", "newenv", env_dir, python_path)  # must not raise
+            _provision_plugin_env("yolo11", "newenv", env_dir, python_path, [], "", [])  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -180,8 +192,11 @@ def test_provision_plugin_env_marker_write_failure_is_non_fatal():
 
 
 def test_pool_get_raises_when_downloads_not_allowed():
+    from testdrive.detection import PluginManifest
     from testdrive.util import set_downloads_allowed
     from testdrive.worker_pool import WorkerError, WorkerPool
+
+    manifest = PluginManifest(id="yolo11", pyenv="newenv")
 
     with tempfile.TemporaryDirectory() as td:
         cd = Path(td)
@@ -189,7 +204,7 @@ def test_pool_get_raises_when_downloads_not_allowed():
         try:
             pool = WorkerPool()
             try:
-                pool.get("yolo11", "yolo11", "newenv", cd)
+                pool.get("yolo11", manifest, cd)
                 assert False, "expected WorkerError"
             except WorkerError as exc:
                 assert exc.kind == "env_not_configured"
@@ -199,8 +214,11 @@ def test_pool_get_raises_when_downloads_not_allowed():
 
 
 def test_pool_get_raises_when_auto_provision_disabled():
+    from testdrive.detection import PluginManifest
     from testdrive.util import set_auto_provision_enabled, set_downloads_allowed
     from testdrive.worker_pool import WorkerError, WorkerPool
+
+    manifest = PluginManifest(id="yolo11", pyenv="newenv")
 
     with tempfile.TemporaryDirectory() as td:
         cd = Path(td)
@@ -209,7 +227,7 @@ def test_pool_get_raises_when_auto_provision_disabled():
         try:
             pool = WorkerPool()
             try:
-                pool.get("yolo11", "yolo11", "newenv", cd)
+                pool.get("yolo11", manifest, cd)
                 assert False, "expected WorkerError"
             except WorkerError as exc:
                 assert exc.kind == "env_not_configured"
@@ -221,7 +239,14 @@ def test_pool_get_raises_when_auto_provision_disabled():
 
 def test_pool_get_provisions_then_spawns_worker():
     from testdrive.util import set_auto_provision_enabled, set_downloads_allowed
+    from testdrive.detection import PluginManifest
     from testdrive.worker_pool import WorkerPool
+
+    manifest = PluginManifest(
+        id="yolo11", pyenv="newenv",
+        requirements=[{"pip": "ultralytics>=8.3", "module": "ultralytics"}],
+        pip_options="--no-build-isolation",
+    )
 
     with tempfile.TemporaryDirectory() as td:
         cd = Path(td)
@@ -230,8 +255,8 @@ def test_pool_get_provisions_then_spawns_worker():
 
         provisioned = {}
 
-        def fake_provision(plugin_id, pyenv_name, env_directory, python_path):
-            provisioned["called"] = (plugin_id, pyenv_name)
+        def fake_provision(plugin_id, pyenv_name, env_directory, python_path, requirements, pip_options, patches):
+            provisioned["called"] = (plugin_id, pyenv_name, tuple(requirements), pip_options, tuple(patches))
             python_path.parent.mkdir(parents=True, exist_ok=True)
             python_path.touch()  # pretend the venv now exists
 
@@ -242,11 +267,13 @@ def test_pool_get_provisions_then_spawns_worker():
         with mock.patch(provision_target, side_effect=fake_provision), \
              mock.patch(handle_target, return_value=fake_handle) as mock_handle:
             pool = WorkerPool()
-            handle = pool.get("yolo11", "yolo11", "newenv", cd)
+            handle = pool.get("yolo11", manifest, cd)
 
-        # Provisioning (pip extras name, message text) uses the clean
-        # manifest id, not any path-shaped ref.
-        assert provisioned["called"] == ("yolo11", "newenv")
+        # Provisioning (message text, pool key) uses the clean manifest
+        # id, not any path-shaped ref — and the plugin's own pinned
+        # requirements/pip_options are what actually gets installed now,
+        # not a pyproject.toml extras name.
+        assert provisioned["called"] == ("yolo11", "newenv", ("ultralytics>=8.3",), "--no-build-isolation", ())
         assert handle is fake_handle
         # Second call for the same plugin reuses the cached handle —
         # no second provisioning call.
@@ -254,22 +281,23 @@ def test_pool_get_provisions_then_spawns_worker():
             "testdrive.worker_pool._provision_plugin_env",
             side_effect=AssertionError("must not provision twice"),
         ):
-            assert pool.get("yolo11", "yolo11", "newenv", cd) is fake_handle
+            assert pool.get("yolo11", manifest, cd) is fake_handle
 
 
 def test_pool_get_spawns_worker_with_raw_ref_not_manifest_id():
     """Regression test: a parked plugin is invoked via a path-shaped ref
     (e.g. "../models_inactive/seem") whose clean manifest id is just
-    "seem". Provisioning (pip extras, pool key) must use the clean id —
-    "seem" is the extras group name in pyproject.toml, and
-    ".[../models_inactive/seem]" isn't valid PEP 508 syntax — but the
-    worker subprocess must still be spawned with the *original ref*,
-    since worker_main.py's own load_plugin() call only resolves parked
-    plugins by that exact path shape (see
+    "seem". Provisioning (pool key, requirements install) must use the
+    clean id — but the worker subprocess must still be spawned with the
+    *original ref*, since worker_main.py's own load_plugin() call only
+    resolves parked plugins by that exact path shape (see
     pluginloader._parse_inactive_ref), not by their bare manifest id.
     """
+    from testdrive.detection import PluginManifest
     from testdrive.util import set_auto_provision_enabled, set_downloads_allowed
     from testdrive.worker_pool import WorkerPool
+
+    manifest = PluginManifest(id="seem", pyenv="seem")
 
     with tempfile.TemporaryDirectory() as td:
         cd = Path(td)
@@ -278,7 +306,7 @@ def test_pool_get_spawns_worker_with_raw_ref_not_manifest_id():
 
         provisioned = {}
 
-        def fake_provision(plugin_id, pyenv_name, env_directory, python_path):
+        def fake_provision(plugin_id, pyenv_name, env_directory, python_path, requirements, pip_options, patches):
             provisioned["called"] = (plugin_id, pyenv_name)
             python_path.parent.mkdir(parents=True, exist_ok=True)
             python_path.touch()
@@ -288,9 +316,9 @@ def test_pool_get_spawns_worker_with_raw_ref_not_manifest_id():
         with mock.patch("testdrive.worker_pool._provision_plugin_env", side_effect=fake_provision), \
              mock.patch("testdrive.worker_pool.WorkerHandle", return_value=fake_handle) as mock_handle:
             pool = WorkerPool()
-            handle = pool.get("../models_inactive/seem", "seem", "seem", cd)
+            handle = pool.get("../models_inactive/seem", manifest, cd)
 
-        # Provisioning/pip-extras uses the clean id ("seem"), never the path.
+        # Provisioning uses the clean id ("seem"), never the path.
         assert provisioned["called"] == ("seem", "seem")
         # But WorkerHandle (which spawns "python -m testdrive.worker_main
         # <ref>") gets the original path-shaped ref, not the bare id —
@@ -384,7 +412,7 @@ def test_provision_plugin_env_real_venv_end_to_end():
         try:
             with mock.patch("subprocess.run", side_effect=run_offline_friendly):
                 worker_pool._provision_plugin_env(
-                    "core-only-test", "newenv", env_dir, python_path,
+                    "core-only-test", "newenv", env_dir, python_path, [], "", [],
                 )
 
             assert python_path.exists()

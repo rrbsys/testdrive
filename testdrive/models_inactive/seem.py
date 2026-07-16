@@ -97,12 +97,65 @@ PLUGIN = {
     "task": "panoptic segmentation",
     "supports": ["text prompts", "boxes"],  # masks reduced to boxes — see util.mask_to_bbox
     "requirements": [
-        {"pip": "Pillow", "module": "PIL"},
-        {"pip": "torch", "module": "torch"},
-        {"pip": "opencv-python", "module": "cv2"},
+        {"pip": "torch==2.0.0", "module": "torch"},
+        {"pip": "setuptools<81", "module": "setuptools"},
+        {"pip": "nltk", "module": "nltk"},
+        {"pip": "einops", "module": "einops"},
+        {"pip": "mpi4py", "module": "mpi4py"},
+        {"pip": "numpy==1.26.4", "module": "numpy"},
+        {"pip": "timm==0.4.12", "module": "timm"},
+        {"pip": "transformers==4.34.0", "module": "transformers"},
+        {"pip": "kornia==0.7.0", "module": "kornia"},
+        {"pip": "opencv-python==4.8.1.78", "module": "cv2"},
+        {"pip": "Pillow==9.4.0", "module": "PIL"},
         {"pip": "detectron2 @ git+https://github.com/MaureenZOU/detectron2-xyz.git",
          "module": "detectron2"},
     ],
+    # detectron2-xyz's C++ extension (built above with --no-build-isolation,
+    # since its setup.py imports torch directly at build time — see
+    # worker_pool.py/pyenv.run_pip_install) doesn't compile against
+    # torch==2.0.0's bundled headers under a modern Apple Clang (21.x):
+    # pybind11's operator""_a literal-operator declaration inside
+    # strong_type.h — vendored into torch's own installed headers — hits
+    # a hard error under recent Clang's stricter C++ conformance
+    # checking. Confirmed by hand: guarding out that one template
+    # specialization (unused by anything detectron2-xyz actually needs)
+    # with #if 0/#endif is enough to let it compile clean. See
+    # PluginManifest.patches / pyenv.apply_source_patches for how/when
+    # this gets applied — after every non-VCS requirement above is
+    # installed (so torch's headers exist to patch) but before the
+    # detectron2-xyz requirement (so the patch is in place before
+    # anything tries to compile against it).
+    "patches": [
+        {
+            "target": "torch/include/c10/util/strong_type.h",
+            "find": (
+                "template <typename T, typename Tag, typename ... M>\n"
+                "struct is_arithmetic<::strong::type<T, Tag, M...>>\n"
+                "  : is_base_of<::strong::arithmetic::modifier<::strong::type<T, Tag, M...>>,\n"
+                "               ::strong::type<T, Tag, M...>>\n"
+                "{\n"
+                "};\n"
+            ),
+            "replace": (
+                "#if 0\n"
+                "template <typename T, typename Tag, typename ... M>\n"
+                "struct is_arithmetic<::strong::type<T, Tag, M...>>\n"
+                "  : is_base_of<::strong::arithmetic::modifier<::strong::type<T, Tag, M...>>,\n"
+                "               ::strong::type<T, Tag, M...>>\n"
+                "{\n"
+                "};\n"
+                "#endif\n"
+            ),
+        },
+    ],
+    # detectron2-xyz's setup.py imports torch directly at build time (to
+    # detect CUDA/pick compile flags) without declaring it under
+    # [build-system] requires, so pip's normal isolated build env — which
+    # only ever contains the build backend, nothing this project installs
+    # — can't see it: --no-build-isolation makes the build run against
+    # this environment instead, where torch (pinned above) already is.
+    "pip_options": "--no-build-isolation",
     "sample_prompt": "yellow circle",
     "test_threshold": "default",
     "models": ["focalt", "focall"],

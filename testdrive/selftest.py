@@ -180,7 +180,7 @@ def run_selftest(plugin_id: str, model_override: str | None = None) -> SelfTestR
         try:
             from .cache import cache_dir
 
-            worker = get_pool().get(plugin_id, plugin.manifest.id, plugin.manifest.pyenv, cache_dir())
+            worker = get_pool().get(plugin_id, plugin.manifest, cache_dir())
             worker.init(model_override or None)
             init_ms = (time.perf_counter() - t0) * 1000
         except WorkerError as exc:
@@ -190,7 +190,7 @@ def run_selftest(plugin_id: str, model_override: str | None = None) -> SelfTestR
 
                 note = "missing: " + ", ".join(exc.missing)
                 result.add_step("dependencies", ok=False, note=note)
-                hint = install_hint(cache_dir(), plugin.manifest.pyenv, exc.missing)
+                hint = install_hint(cache_dir(), plugin.manifest.pyenv, exc.missing, plugin.manifest.pip_options)
                 result.failures.append(f"missing packages: {', '.join(exc.missing)}\nInstall with:  {hint}")
             elif exc.kind == "env_not_configured":
                 result.add_step("environment", ok=False, note=str(exc))
@@ -209,12 +209,57 @@ def run_selftest(plugin_id: str, model_override: str | None = None) -> SelfTestR
         if not installed:
             from .cache import cache_dir
             from .pyenv import install_hint
+            from .util import get_auto_provision_enabled, get_downloads_allowed
 
-            note = "missing: " + ", ".join(missing)
-            result.add_step("dependencies", ok=False, note=note)
-            hint = install_hint(cache_dir(), plugin.manifest.pyenv, missing)
-            result.failures.append(f"missing packages: {', '.join(missing)}\nInstall with:  {hint}")
-            return result
+            if get_downloads_allowed() and get_auto_provision_enabled():
+                # Auto-provision straight into the framework's own
+                # environment — same pinned-requirements/pip_options/
+                # patches mechanism as a plugin with its own dedicated
+                # pyenv (see worker_pool._provision_plugin_env), just
+                # targeting the already-running framework env directly
+                # rather than spinning up a fresh one, since a
+                # "framework"-pyenv plugin runs in-process inside it
+                # instead of in a worker subprocess.
+                import sys as _sys
+
+                from .pyenv import env_python_path, run_pip_install
+
+                def _announce(msg: str) -> None:
+                    print(f"[testdrive] {msg}", file=_sys.stderr)
+
+                python_path = env_python_path(cache_dir(), plugin.manifest.pyenv)
+                requirements = [req["pip"] for req in plugin.manifest.requirements]
+                _announce(
+                    f"installing missing dependencies for plugin '{plugin_id}' "
+                    f"into the '{plugin.manifest.pyenv}' environment..."
+                )
+                try:
+                    run_pip_install(
+                        python_path, requirements, plugin.manifest.pip_options,
+                        plugin.manifest.patches, announce=_announce,
+                    )
+                except Exception as exc:  # noqa: BLE001 — CalledProcessError or RuntimeError
+                    result.add_step("dependencies", ok=False, note=f"auto-install failed: {exc}")
+                    hint = install_hint(
+                        cache_dir(), plugin.manifest.pyenv, requirements, plugin.manifest.pip_options
+                    )
+                    result.failures.append(
+                        f"could not install dependencies: {exc}\nInstall by hand:  {hint}"
+                    )
+                    return result
+
+                # Re-check: freshly installed packages are importable in
+                # this same process from here on — nothing was ever
+                # attempted-and-cached-as-missing for them before now,
+                # so a plain re-import attempt picks them up cleanly.
+                installed, missing = plugin.is_installed()
+
+            if not installed:
+                note = "missing: " + ", ".join(missing)
+                result.add_step("dependencies", ok=False, note=note)
+                hint = install_hint(cache_dir(), plugin.manifest.pyenv, missing, plugin.manifest.pip_options)
+                result.failures.append(f"missing packages: {', '.join(missing)}\nInstall with:  {hint}")
+                return result
         result.add_step("dependencies", ok=True)
 
     # ------------------------------------------------------------------ #
@@ -267,7 +312,7 @@ def run_selftest(plugin_id: str, model_override: str | None = None) -> SelfTestR
             try:
                 from .cache import cache_dir
 
-                worker = get_pool().get(plugin_id, plugin.manifest.id, plugin.manifest.pyenv, cache_dir())
+                worker = get_pool().get(plugin_id, plugin.manifest, cache_dir())
                 detections = worker.detect(tmp_path, prompt, 0.1, model_override or None)
             finally:
                 tmp_path.unlink(missing_ok=True)
