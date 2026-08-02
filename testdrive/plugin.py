@@ -36,6 +36,22 @@ class DetectorPlugin(ABC):
         """Run inference and return a list of :class:`Detection`."""
         raise NotImplementedError
 
+    def run_task(self, image: Any, task_prompt: str) -> str:
+        """Run a text-output task (captioning, OCR, ...) and return the
+        generated text — see ``PluginManifest.tasks``.
+
+        *task_prompt* is the manifest's task *value* (e.g.
+        ``"<CAPTION>"``), already looked up from whatever short name the
+        person actually typed as their prompt — plugins never see the
+        short name here.
+
+        Only meaningful for plugins that declare ``manifest.tasks``;
+        the default implementation raises for everything else, so a
+        plugin only needs to override this if it opts in by declaring
+        that dict in the first place (see florence2.py).
+        """
+        raise NotImplementedError(f"plugin '{self.manifest.id}' does not implement run_task()")
+
     def is_installed(self) -> tuple[bool, list[str]]:
         """Return ``(installed, missing_pip_packages)``.
 

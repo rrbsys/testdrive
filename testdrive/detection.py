@@ -53,6 +53,16 @@ class DetectionResult:
     elapsed_ms: float = 0.0
     warnings: list[str] = field(default_factory=list)
 
+    #: Set instead of ``detections`` when ``prompt`` matched one of the
+    #: plugin's ``PluginManifest.tasks`` keys (see there) — a plain
+    #: generated-text result (captioning, OCR, ...) rather than a list
+    #: of bounding boxes. Mutually exclusive with ``detections`` in
+    #: practice (a task-mode run leaves ``detections`` empty and skips
+    #: annotating/saving output images entirely — see summary() below
+    #: and _run_detect_one in cli.py), though nothing enforces that at
+    #: the type level.
+    text_result: str | None = None
+
     # --- derived output paths (set by the framework after saving) ---
     matches_path: Path | None = None
     redacted_path: Path | None = None
@@ -71,6 +81,14 @@ class DetectionResult:
         ]
         if self.model:
             lines.append(f"Model    : {self.model}")
+        if self.text_result is not None:
+            # Task mode (see PluginManifest.tasks) — a plain generated
+            # text result, not a list of boxes; no match count, no
+            # annotated/redacted images were ever produced to point at.
+            lines.append(f"Time     : {self.elapsed_ms:.0f} ms")
+            lines.append("")
+            lines.append(self.text_result)
+            return "\n".join(lines)
         lines += [
             f"Matches  : {self.count}",
             f"Time     : {self.elapsed_ms:.0f} ms",
@@ -173,6 +191,18 @@ class PluginManifest:
     #: every class the model can report. Empty for open-vocabulary
     #: plugins, which accept arbitrary prompt text instead.
     classes: list[str] = field(default_factory=list)
+
+    #: For multi-task plugins (e.g. Florence-2's captioning/OCR/etc.
+    #: modes, alongside its normal grounded-detection task): short
+    #: user-facing names mapped to whatever internal task token the
+    #: model actually expects (e.g. ``{"caption": "<CAPTION>"}``). If
+    #: ``prompt`` exactly matches one of these keys, that's a *text*
+    #: task (see DetectorPlugin.run_task / DetectionResult.text_result)
+    #: instead of a normal bounding-box detect() call — no bounding
+    #: boxes come back, so there's nothing to annotate/save an image
+    #: for; the generated text is the whole result. Empty for plugins
+    #: with no such alternate text-output tasks.
+    tasks: dict[str, str] = field(default_factory=dict)
 
     #: Which named virtual environment this plugin runs in. Every
     #: plugin shares the "framework" environment (cache/pyenv/framework)

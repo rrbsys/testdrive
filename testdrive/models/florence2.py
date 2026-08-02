@@ -42,6 +42,12 @@ PLUGIN = {
     "sample_prompt": "blue triangle",
     "test_threshold": "default",
     "pyenv": "framework",
+    "tasks": {
+        "describe": "<MORE_DETAILED_CAPTION>",
+        "caption": "<CAPTION>",
+        "brief": "<DETAILED_CAPTION>",
+        "ocr": "<OCR>",
+    },
 }
 
 
@@ -76,6 +82,51 @@ class Plugin(DetectorPlugin):
         self._initialized = True
         log.info("Florence-2 ready")
 
+    def _generate(self, image: "PILImage.Image", text_input: str) -> str:
+        """Run the processor -> model.generate -> decode steps shared by
+        both detect() (grounded-phrase boxes) and run_task() (plain
+        generated text) — they differ only in what they do with the
+        raw decoded string afterward (post_process_generation() returns
+        a bboxes/labels dict for one, a plain string for the other).
+        """
+        import torch
+
+        inputs = self._processor(text=text_input, images=image, return_tensors="pt").to(
+            self._device
+        )
+
+        with torch.no_grad():
+            generated_ids = self._model.generate(
+                input_ids=inputs["input_ids"],
+                pixel_values=inputs["pixel_values"],
+                max_new_tokens=1024,
+                do_sample=False,
+                num_beams=3,
+            )
+
+        return self._processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
+
+    def run_task(self, image: "PILImage.Image", task_prompt: str) -> str:
+        """Run one of Florence-2's plain (no-phrase-argument) text tasks
+        — captioning, OCR, etc. — see ``PLUGIN["tasks"]``.
+
+        Unlike ``detect()``'s ``<CAPTION_TO_PHRASE_GROUNDING>`` task,
+        these take the bare task token with nothing appended, and
+        ``post_process_generation()`` hands back a plain string for
+        them instead of a bboxes/labels dict.
+        """
+        if not self._initialized:
+            self.initialize()
+
+        generated_text = self._generate(image, task_prompt)
+        parsed = self._processor.post_process_generation(
+            generated_text,
+            task=task_prompt,
+            image_size=(image.width, image.height),
+        )
+        result = parsed.get(task_prompt, "")
+        return result.strip() if isinstance(result, str) else str(result)
+
     def detect(
         self, image: "PILImage.Image", prompt: str, threshold: float = 0.3
     ) -> list[Detection]:
@@ -94,28 +145,11 @@ class Plugin(DetectorPlugin):
         list), so ``threshold`` has nothing to filter against and every
         returned box gets ``score=1.0``.
         """
-        import torch
-
         if not self._initialized:
             self.initialize()
 
         task_prompt = "<CAPTION_TO_PHRASE_GROUNDING>"
-        text_input = task_prompt + prompt
-
-        inputs = self._processor(text=text_input, images=image, return_tensors="pt").to(
-            self._device
-        )
-
-        with torch.no_grad():
-            generated_ids = self._model.generate(
-                input_ids=inputs["input_ids"],
-                pixel_values=inputs["pixel_values"],
-                max_new_tokens=1024,
-                do_sample=False,
-                num_beams=3,
-            )
-
-        generated_text = self._processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
+        generated_text = self._generate(image, task_prompt + prompt)
 
         parsed = self._processor.post_process_generation(
             generated_text,

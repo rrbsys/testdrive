@@ -242,6 +242,13 @@ def _print_manifest_text(m: PluginManifest) -> None:
         if row:
             print("    " + ", ".join(row))
         print()
+    if m.tasks:
+        print(f"Tasks ({len(m.tasks)})")
+        print("    Use one of these as the prompt for a text result instead of boxes:")
+        width = max(len(k) for k in m.tasks)
+        for name, token in m.tasks.items():
+            print(f"    {name.ljust(width)}  ->  {token}")
+        print()
     if m.sample_prompt:
         print(f'Sample prompt  : "{m.sample_prompt}"')
 
@@ -507,6 +514,62 @@ def _run_detect_one(
 
     width, height = image.size
     log.info("image loaded: %s (%dx%d)", image_path.name, width, height)
+
+    # 3.5. task mode (see PluginManifest.tasks): prompt exactly matches
+    # one of a multi-task plugin's declared short names (e.g.
+    # Florence-2's "caption"/"ocr"/...) — run its text-output task
+    # instead of normal bounding-box detect(), and skip annotating/
+    # saving output images entirely (there are no boxes to draw).
+    # Worker-routed (non-"framework"-pyenv) plugins aren't supported
+    # here yet — worker_main.py's wire protocol has no "task" command,
+    # only "init"/"detect"/"shutdown" — since no current plugin needs
+    # both a dedicated pyenv and text tasks. Extend worker_main.py's
+    # protocol first if that changes.
+    if plugin.manifest.tasks and prompt in plugin.manifest.tasks:
+        if uses_worker:
+            return ExitCode.CLI_ERROR, None, (
+                f"plugin '{plugin_id}' declares task '{prompt}', but text tasks aren't "
+                f"supported yet for a plugin with its own pyenv (only \"framework\"-pyenv "
+                f"plugins can run one right now)"
+            )
+        try:
+            log.info("initializing plugin '%s' ...", plugin_id)
+            plugin.initialize()
+        except CacheNotPopulatedError as exc:
+            return (
+                ExitCode.MISSING_DEPENDENCY,
+                None,
+                (
+                    f"plugin '{plugin_id}' needs its model downloaded first ({exc}). "
+                    f"Run `testdrive -T {plugin_id}` (or -TT {plugin_id}) once to populate the "
+                    f"cache, then re-run this command."
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ExitCode.INFERENCE_FAILED, None, f"plugin '{plugin_id}' initialize() failed: {exc}"
+
+        task_prompt = plugin.manifest.tasks[prompt]
+        try:
+            log.info("running task: prompt=%r  (task token: %s)", prompt, task_prompt)
+            t0 = time.perf_counter()
+            text_result = plugin.run_task(image, task_prompt)
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+        except Exception as exc:  # noqa: BLE001
+            return ExitCode.INFERENCE_FAILED, None, f"plugin '{plugin_id}' run_task() raised: {exc}"
+
+        result = DetectionResult(
+            image_path=image_path.resolve(),
+            image_size=(width, height),
+            plugin_id=plugin.manifest.id,
+            plugin_name=plugin.manifest.name or plugin.manifest.id,
+            plugin_version=plugin.manifest.version,
+            prompt=prompt,
+            threshold=threshold,
+            model=plugin.manifest.model if plugin.manifest.models else "",
+            text_result=text_result,
+            elapsed_ms=elapsed_ms,
+        )
+        return ExitCode.SUCCESS, result, None
 
     if uses_worker:
         # 4 + 5 (worker path): a worker subprocess, kept alive across
