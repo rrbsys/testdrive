@@ -21,8 +21,9 @@ needs to change.
 | `florence2` | Florence-2 | phrase-grounding via `<CAPTION_TO_PHRASE_GROUNDING>` |
 | `samgd` | Grounding DINO + SAM | GDINO box, refined to a tight mask-derived box by SAM |
 | `yolo11` | YOLO11 | fixed 80-class COCO vocabulary (not open-vocabulary like the rest — see below), fast, own `pyenv` |
+| `yunet` | YuNet | fixed single-class (face-only) detection — prompt must be `"face"` — see below; fast CPU-only OpenCV DNN, no torch |
 
-Two plugins are parked in `testdrive/models_inactive/` (a sibling of
+Three plugins are parked in `testdrive/models_inactive/` (a sibling of
 `testdrive/models/`, not a subpackage of it — so its files use the
 same relative-import depth as an active plugin's). They're never
 discovered automatically, so they don't appear in `-L`/`-I`/`-M
@@ -36,12 +37,20 @@ testdrive -T ../models_inactive/molmo
 testdrive ../models_inactive/seem photo.jpg "a cat"
 ```
 
-- **`seem`** — there is no `transformers`-compatible SEEM model. The
-  only HF repo for it ships raw checkpoint files with no
-  `config.json`/processor/modeling code — nothing for `AutoModel*` to
-  load, `trust_remote_code=True` or not. Making it real would mean
-  vendoring the original research repo's own loader, which is out of
-  scope here.
+- **`seem`** — scaffolded on `feature/seem` / `plugin/seem`, not yet
+  real. There's no `transformers`-compatible SEEM model (the only HF
+  repo for it ships raw checkpoint files, nothing `AutoModel*` can
+  load), and the upstream research repo needs its own old/exotic
+  dependency chain (a `detectron2` fork, an old pinned torch) that no
+  other plugin here should ever be exposed to — so `seem` declares its
+  own `"pyenv": "seem"` (see `PluginManifest.pyenv`) rather than the
+  default `"framework"`, auto-provisioning an entirely separate virtual
+  environment on first use. The repo/checkpoint-fetching plumbing is
+  real (see `util.ensure_git_repo`/`download_file`); the actual model
+  construction and inference call are not yet verified against the
+  real upstream source — see the `TODO(seem):` comments in
+  `models_inactive/seem.py`'s own module docstring for exactly what's
+  left.
 - **`molmo` / `molmo7b`** — Molmo points at things rather than drawing
   boxes, so its output is approximated into small boxes centered on
   each point. The dense 7B model (`molmo7b.py`) didn't reliably finish
@@ -60,7 +69,15 @@ declares five selectable sizes (`-M yolo11` → `models`), with
 with `--model yolo11n` (fastest/smallest) through `--model yolo11x`
 (largest/most accurate). It's also the one plugin currently using its
 own dedicated environment (`pyenv: "newenv"`) rather than the shared
-`"framework"` one — see the next section.
+"framework" one everything else defaults to.
+
+**`yunet`** is fixed-vocabulary too, but even more narrowly: it only
+ever detects one thing, faces. There's no list of classes to pick from
+— `prompt` must simply be `"face"` (case-insensitive) to confirm
+intent; anything else reports nothing, with a warning. It's the only
+plugin here that doesn't use torch/transformers at all — just OpenCV's
+DNN module and a ~230KB onnx checkpoint — so it's by far the lightest
+and fastest plugin to install and run.
 
 ## The framework's own environment
 
@@ -110,9 +127,14 @@ the first time it's actually needed (`-T`/`-TT`; same "don't do this
 by surprise during a plain detect run" discipline as model downloads —
 see Cache discipline below), running `python -m venv`, an optional
 `pip install --upgrade pip` first, then installing testdrive itself
-plus that plugin's own extra into it. Progress is printed as it
-happens (this can take a while — torch-class dependencies aren't
-small). Two flags control this:
+plus that plugin's own pinned requirements (`PLUGIN["requirements"]`
+in its manifest — real version pins, not just bare package names) into
+it, applying any `pip_options` (e.g. `--no-build-isolation`) and
+source `patches` (see `testdrive/models_inactive/seem.py` for a plugin
+using both, and `PluginManifest`/`pyenv.run_pip_install` for exactly
+what these do and when they run) it declares along the way. Progress
+is printed as it happens (this can take a while — torch-class
+dependencies aren't small). Two flags control this:
 
 - `--no-auto-provision` — set the environment up by hand instead (same
   3-step shape as the framework env, minus step 1 — see the error
@@ -143,16 +165,24 @@ git clone https://github.com/<you>/testdrive.git
 cd testdrive
 pip install -e .
 
-# Install backend deps for the plugin(s) you want to run:
-pip install -e ".[owlv2]"          # one plugin
-pip install -e ".[owlv2,owlvit]"   # a few
-pip install -e ".[all]"            # every active plugin
+# Install backend deps for the plugin(s) you want to run — testdrive
+# does this itself now (see "Plugin environments" above), whether a
+# plugin shares the framework's own environment or has its own
+# dedicated one:
+testdrive -T owlv2      # one plugin
+testdrive -T '*'        # every active plugin at once
 ```
 
-`transformers` is pinned to exactly `4.50.3` in every extra — every
-later release we've tried introduces a regression that pulls in a
-TensorFlow dependency chain, which then breaks these plugins. Revisit
-this once that's fixed upstream.
+Each plugin's own pinned dependency versions (`transformers==4.50.3` for
+most of them, currently — every later release we've tried introduces a
+regression that pulls in a TensorFlow dependency chain, which then
+breaks these plugins; revisit this once that's fixed upstream) live in
+that plugin's own manifest (`PLUGIN["requirements"]` — see e.g.
+`testdrive/models/owlv2.py`) now, not in a hand-maintained
+`pyproject.toml` extras group — see "Plugin environments" above for
+why a plain extras group couldn't express this for every plugin
+anyway (a `pip_options` flag like SEEM's `--no-build-isolation`, or an
+ordered source patch — see `testdrive/models_inactive/seem.py`).
 
 **The core framework needs only `Pillow`.** `-L`, `-I`, `-M` (including
 `-M --json`) all work with nothing else installed — verified by running

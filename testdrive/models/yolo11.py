@@ -142,8 +142,8 @@ PLUGIN = {
     "supports": ["80 fixed COCO classes", "multiple model sizes (--model)", "fast CPU inference"],
     "requirements": [
         {"pip": "Pillow", "module": "PIL"},
-        {"pip": "torch", "module": "torch"},
-        {"pip": "ultralytics", "module": "ultralytics"},
+        {"pip": "torch>=2.2", "module": "torch"},
+        {"pip": "ultralytics>=8.3", "module": "ultralytics"},
     ],
     "sample_prompt": "person",
     "test_threshold": "default",

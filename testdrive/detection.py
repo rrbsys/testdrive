@@ -53,6 +53,16 @@ class DetectionResult:
     elapsed_ms: float = 0.0
     warnings: list[str] = field(default_factory=list)
 
+    #: Set instead of ``detections`` when ``prompt`` matched one of the
+    #: plugin's ``PluginManifest.tasks`` keys (see there) — a plain
+    #: generated-text result (captioning, OCR, ...) rather than a list
+    #: of bounding boxes. Mutually exclusive with ``detections`` in
+    #: practice (a task-mode run leaves ``detections`` empty and skips
+    #: annotating/saving output images entirely — see summary() below
+    #: and _run_detect_one in cli.py), though nothing enforces that at
+    #: the type level.
+    text_result: str | None = None
+
     # --- derived output paths (set by the framework after saving) ---
     matches_path: Path | None = None
     redacted_path: Path | None = None
@@ -71,6 +81,14 @@ class DetectionResult:
         ]
         if self.model:
             lines.append(f"Model    : {self.model}")
+        if self.text_result is not None:
+            # Task mode (see PluginManifest.tasks) — a plain generated
+            # text result, not a list of boxes; no match count, no
+            # annotated/redacted images were ever produced to point at.
+            lines.append(f"Time     : {self.elapsed_ms:.0f} ms")
+            lines.append("")
+            lines.append(self.text_result)
+            return "\n".join(lines)
         lines += [
             f"Matches  : {self.count}",
             f"Time     : {self.elapsed_ms:.0f} ms",
@@ -116,7 +134,39 @@ class PluginManifest:
     task: str = ""
 
     supports: list[str] = field(default_factory=list)
+
+    #: Each entry: {"pip": <pip install argument>, "module": <import
+    #: name to probe for is_installed()>}. "pip" now carries the real,
+    #: exact version pin this plugin needs (e.g. "torch==2.0.0", or a
+    #: "name @ git+https://..." VCS reference) — not just a bare
+    #: package name — since it doubles as this plugin's actual
+    #: auto-provisioning install list (see pyenv.run_pip_install,
+    #: worker_pool._provision_plugin_env, and selftest.py's
+    #: framework-pyenv auto-provision branch), not just something
+    #: shown in a "missing dependency" hint message.
     requirements: list[dict[str, str]] = field(default_factory=list)
+
+    #: Extra flags appended to every pip install command run for this
+    #: plugin's requirements (auto-provisioning or the manual
+    #: --no-auto-provision hint alike) — e.g. "--no-build-isolation"
+    #: for a plugin whose build needs the current environment rather
+    #: than pip's normal isolated build env (see seem.py, whose old
+    #: GPU-only dependency chain needs this). Empty string (the
+    #: default) adds nothing.
+    pip_options: str = ""
+
+    #: Source patches to apply mid-provisioning, after installing every
+    #: non-VCS entry in ``requirements`` but before any "name @ git+..."
+    #: entry (which is exactly the ordering a plugin like seem needs:
+    #: patch an already-installed dependency's vendored header *before*
+    #: building something from source against it). Each entry:
+    #: {"target": <path relative to the environment's site-packages,
+    #: e.g. "torch/include/c10/util/foo.h">, "find": <exact text to
+    #: replace, must appear exactly once>, "replace": <replacement
+    #: text>}. Idempotent — if "find" is already gone and "replace" is
+    #: already present, re-provisioning is a safe no-op rather than an
+    #: error. See pyenv.apply_source_patches.
+    patches: list[dict[str, str]] = field(default_factory=list)
 
     sample_prompt: str = ""
 
@@ -141,6 +191,18 @@ class PluginManifest:
     #: every class the model can report. Empty for open-vocabulary
     #: plugins, which accept arbitrary prompt text instead.
     classes: list[str] = field(default_factory=list)
+
+    #: For multi-task plugins (e.g. Florence-2's captioning/OCR/etc.
+    #: modes, alongside its normal grounded-detection task): short
+    #: user-facing names mapped to whatever internal task token the
+    #: model actually expects (e.g. ``{"caption": "<CAPTION>"}``). If
+    #: ``prompt`` exactly matches one of these keys, that's a *text*
+    #: task (see DetectorPlugin.run_task / DetectionResult.text_result)
+    #: instead of a normal bounding-box detect() call — no bounding
+    #: boxes come back, so there's nothing to annotate/save an image
+    #: for; the generated text is the whole result. Empty for plugins
+    #: with no such alternate text-output tasks.
+    tasks: dict[str, str] = field(default_factory=dict)
 
     #: Which named virtual environment this plugin runs in. Every
     #: plugin shares the "framework" environment (cache/pyenv/framework)

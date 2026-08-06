@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "testdrive"
-version = "0.1.2"
+version = "0.1.1"
 description = "One CLI. Many vision foundation models."
 readme = "README.md"
 license = { text = "MIT" }
@@ -32,27 +32,20 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# transformers is pinned exactly (not just a lower bound) because
-# versions after 4.50.3 introduced a regression that pulls in a
-# TensorFlow dependency chain, which in turn breaks every plugin here
-# (confirmed by hand; see requirements.txt). Revisit this pin once
-# that's fixed upstream.
-groundingdino = ["torch>=2.2", "transformers==4.50.3"]
-owlv2         = ["torch>=2.2", "transformers==4.50.3", "scipy"]
-owlvit        = ["torch>=2.2", "transformers==4.50.3"]
-florence2     = ["torch>=2.2", "transformers==4.50.3", "einops", "timm"]
-samgd         = ["torch>=2.2", "transformers==4.50.3", "numpy", "segment-anything"]
-# Note: the "segment-anything" PyPI package is an unofficial third-party
-# mirror (Meta doesn't publish SAM to PyPI themselves — their own
-# instructions are `pip install git+https://github.com/facebookresearch/segment-anything.git`).
-# It exposes the same `from segment_anything import ...` API we use and
-# works fine, but if you want the authoritative source, install that git
-# URL yourself instead before installing this extra.
-# yolo11 doesn't use transformers at all, so it's unaffected by the pin
-# above — just torch + ultralytics.
-yolo11        = ["torch>=2.2", "ultralytics>=8.3"]
-# Every active plugin's dependencies at once.
-all = ["testdrive[groundingdino,owlv2,owlvit,florence2,samgd,yolo11]"]
+# Every plugin's actual dependencies (with real version pins) now live
+# in its own PLUGIN["requirements"]/["pip_options"]/["patches"] — see
+# PluginManifest in detection.py and pyenv.run_pip_install. There's
+# deliberately no "someplugin = [...]" / "all = [...]" extras here
+# anymore: testdrive provisions a plugin's environment itself now
+# (`testdrive -T <plugin>`, or `-T '*'` for every plugin at once — see
+# README's Installation section), whether that's a dedicated pyenv (see
+# worker_pool._provision_plugin_env) or, for the default "framework"
+# pyenv most plugins share, installing straight into the environment
+# already running testdrive (see selftest.py). A hand-written pip
+# extras group can't express any of that per-plugin machinery (a
+# pip_options flag like seem's --no-build-isolation, or its ordered
+# source patch — see seem.py) — it was never anything more than a
+# hand-maintained mirror of what's now the single source of truth.
 dev = ["pytest>=7.0", "ruff>=0.4", "mypy>=1.8"]
 
 [project.scripts]
@@ -92,6 +85,7 @@ module = [
     "einops.*",
     "timm.*",
     "ultralytics.*",
+    "torchvision.*",
 ]
 ignore_missing_imports = true
 

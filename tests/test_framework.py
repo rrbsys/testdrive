@@ -301,6 +301,42 @@ def test_cli_find_example_image_resolves_inactive_plugin_path():
     assert expected == 1
 
 
+def test_seem_manifest_uses_own_isolated_pyenv():
+    # The whole point of parking seem.py with a non-"framework" pyenv:
+    # its exotic dependency chain must never be able to affect any
+    # other plugin's (or the framework's own) environment.
+    loaded = load_plugin("../models_inactive/seem")
+    m = loaded.manifest
+    assert m.id == "seem"
+    assert m.pyenv == "seem"
+    assert m.pyenv != "framework"
+
+
+def test_seem_manifest_declares_focalt_and_focall_variants():
+    loaded = load_plugin("../models_inactive/seem")
+    m = loaded.manifest
+    assert set(m.models) == {"focalt", "focall"}
+    assert m.model == "focalt"
+
+
+def test_seem_not_installed_without_its_exotic_deps():
+    # In any environment that doesn't have the "seem" extra's exotic
+    # deps installed (the overwhelming common case, including CI) —
+    # is_installed() must report it missing rather than crash, via the
+    # same default requirements-probing behavior every other plugin
+    # relies on (no override needed here — see seem.py itself).
+    loaded = load_plugin("../models_inactive/seem")
+    plugin = loaded.instantiate()
+    installed, missing = plugin.is_installed()
+    assert installed is False
+    assert len(missing) > 0
+
+
+def test_seem_absent_from_discovery_like_other_parked_plugins():
+    ids = {p.manifest.id for p in iter_loadable_plugins()}
+    assert "seem" not in ids
+
+
 # ---------------------------------------------------------------------------
 # owlv2 model file
 # ---------------------------------------------------------------------------
@@ -616,6 +652,140 @@ def test_cache_info_shows_env_var_source():
             assert info["source"] == "$TESTDRIVE_CACHE"
         finally:
             del os.environ["TESTDRIVE_CACHE"]
+
+
+# ---------------------------------------------------------------------------
+# util.py: mask_to_bbox / ensure_git_repo
+# ---------------------------------------------------------------------------
+
+
+def test_mask_to_bbox_tight_box_around_nonzero_pixels():
+    import numpy as np
+
+    from testdrive.util import mask_to_bbox
+
+    mask = np.zeros((10, 10), dtype=bool)
+    mask[2:5, 3:7] = True  # rows 2..4, cols 3..6
+    assert mask_to_bbox(mask) == (3, 2, 6, 4)
+
+
+def test_mask_to_bbox_empty_mask_returns_none():
+    import numpy as np
+
+    from testdrive.util import mask_to_bbox
+
+    assert mask_to_bbox(np.zeros((10, 10), dtype=bool)) is None
+
+
+def test_mask_to_bbox_single_pixel():
+    import numpy as np
+
+    from testdrive.util import mask_to_bbox
+
+    mask = np.zeros((5, 5), dtype=bool)
+    mask[2, 3] = True
+    assert mask_to_bbox(mask) == (3, 2, 3, 2)
+
+
+def test_ensure_git_repo_clones_and_checks_out_ref():
+    import subprocess
+    import tempfile
+    import unittest.mock as mock
+    from pathlib import Path
+
+    from testdrive.util import ensure_git_repo
+
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        if cmd[:2] == ["git", "clone"]:
+            Path(cmd[-1]).mkdir(parents=True, exist_ok=True)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    with tempfile.TemporaryDirectory() as td:
+        cd = Path(td)
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            result = ensure_git_repo("https://example.com/x.git", "abc123", cd, "seem")
+
+        assert result == cd / "repos" / "seem"
+        assert (result / ".testdrive_complete").exists()
+        assert calls[0][:2] == ["git", "clone"]
+        assert calls[0][2] == "https://example.com/x.git"
+        assert calls[1][:4] == ["git", "-C", calls[1][2], "checkout"]
+        assert calls[1][4] == "abc123"
+
+
+def test_ensure_git_repo_second_call_is_a_no_op():
+    import subprocess
+    import tempfile
+    import unittest.mock as mock
+    from pathlib import Path
+
+    from testdrive.util import ensure_git_repo
+
+    def fake_run(cmd, **kw):
+        if cmd[:2] == ["git", "clone"]:
+            Path(cmd[-1]).mkdir(parents=True, exist_ok=True)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    with tempfile.TemporaryDirectory() as td:
+        cd = Path(td)
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            ensure_git_repo("https://example.com/x.git", "abc123", cd, "seem")
+
+        with mock.patch("subprocess.run", side_effect=AssertionError("must not clone again")):
+            result = ensure_git_repo("https://example.com/x.git", "abc123", cd, "seem")
+        assert result == cd / "repos" / "seem"
+
+
+def test_ensure_git_repo_raises_cache_not_populated_when_downloads_disallowed():
+    import tempfile
+    from pathlib import Path
+
+    from testdrive.util import CacheNotPopulatedError, ensure_git_repo, set_downloads_allowed
+
+    set_downloads_allowed(False)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            try:
+                ensure_git_repo("https://example.com/x.git", "abc123", Path(td), "seem")
+                assert False, "expected CacheNotPopulatedError"
+            except CacheNotPopulatedError:
+                pass
+    finally:
+        set_downloads_allowed(True)
+
+
+def test_ensure_git_repo_failed_checkout_leaves_no_partial_state():
+    """A bad ref (or any failure after the clone) must not leave behind
+    a directory that a later call would mistake for a completed clone.
+    """
+    import subprocess
+    import tempfile
+    import unittest.mock as mock
+    from pathlib import Path
+
+    from testdrive.util import ensure_git_repo
+
+    def fake_run(cmd, **kw):
+        if cmd[:2] == ["git", "clone"]:
+            Path(cmd[-1]).mkdir(parents=True, exist_ok=True)
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        # the "git checkout" step fails
+        raise subprocess.CalledProcessError(1, cmd, output="", stderr="unknown revision")
+
+    with tempfile.TemporaryDirectory() as td:
+        cd = Path(td)
+        with mock.patch("subprocess.run", side_effect=fake_run):
+            try:
+                ensure_git_repo("https://example.com/x.git", "bad-ref", cd, "seem")
+                assert False, "expected CalledProcessError"
+            except subprocess.CalledProcessError:
+                pass
+
+        assert not (cd / "repos" / "seem").exists()
+        assert not (cd / "repos" / "seem.part").exists()
 
 
 def test_owlv2_initialize_uses_local_snapshot_dir():

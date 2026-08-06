@@ -10,9 +10,10 @@ multiple requests within a single testdrive invocation (see
 which can be extremely expensive, see Molmo — only has to run once per
 CLI invocation, not once per image in a loop-mode run.
 
-Wire protocol (each message is exactly one line of JSON; nothing else
-is ever written to stdout, so the pipe can't get corrupted by stray
-prints):
+Wire protocol (each message is exactly one line of JSON; the real
+stdout file descriptor is reserved for these lines only — see
+``_protect_stdout()`` for how that's enforced even against native
+(non-Python) writes to fd 1, not just Python-level ``print()``):
 
     parent -> worker
         {"cmd": "init", "model": str | null}
@@ -36,11 +37,16 @@ prints):
         {"ok": false, "kind": "cache_not_populated", "message": str}
         {"ok": false, "kind": "error", "message": str}
 
-The worker never writes anything to stdout except these response
-lines — plugin/library logging goes to stderr (Python logging's
-default), which the parent lets pass through directly rather than
-capturing, so worker-side messages are still visible to the person
-running testdrive.
+Plugin/library logging goes to stderr (Python logging's default),
+which the parent lets pass through directly rather than capturing, so
+worker-side messages are still visible to the person running
+testdrive. Anything a plugin's own dependencies write to stdout
+instead — Python ``print()`` calls buried in vendored research code,
+or even native (non-Python) writes like the startup banners some MPI
+implementations print straight to fd 1 in C, bypassing ``sys.stdout``
+entirely — also ends up visible on stderr rather than corrupting the
+JSON response line the parent is waiting for; see
+``_protect_stdout()``.
 """
 
 from __future__ import annotations
@@ -49,15 +55,44 @@ import json
 import logging
 import os
 import sys
+import traceback
 from pathlib import Path
 from typing import Any
 
 log = logging.getLogger("testdrive.worker_main")
 
+_protocol_out: Any = None  # set by _protect_stdout() before any request handling
+
+
+def _protect_stdout() -> None:
+    """Reserve the real stdout file descriptor for the JSON protocol.
+
+    Must run before importing anything plugin-related (pluginloader,
+    the plugin module itself, and whatever it imports — torch,
+    mpi4py, transformers, ...), since any of those can write to
+    stdout during import or later inside initialize()/detect(). A
+    plain ``sys.stdout = sys.stderr`` reassignment only redirects
+    Python-level writes; some native libraries (mpi4py/OpenMPI's
+    startup banners are a known example) write straight to fd 1 in C,
+    which bypasses ``sys.stdout`` entirely and would still land on
+    the same pipe the parent is reading the JSON response from,
+    corrupting that line. Duplicating the real fd 1 aside first, then
+    pointing fd 1 itself at stderr, protects against both cases: every
+    future write to "stdout" — Python or native — actually lands on
+    stderr (still visible, doesn't break the protocol), while
+    ``_respond()`` keeps a private, untouched handle to the original
+    fd 1 to send the actual protocol lines through.
+    """
+    global _protocol_out
+    real_stdout_fd = os.dup(1)
+    os.dup2(2, 1)  # fd 1 (stdout) now aliases fd 2 (stderr) for everyone
+    _protocol_out = os.fdopen(real_stdout_fd, "w", buffering=1)
+    sys.stdout = sys.stderr  # keep the Python-level object consistent too
+
 
 def _respond(payload: dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(payload) + "\n")
-    sys.stdout.flush()
+    _protocol_out.write(json.dumps(payload) + "\n")
+    _protocol_out.flush()
 
 
 def _apply_parent_settings() -> None:
@@ -105,6 +140,12 @@ def main(argv: list[str]) -> int:
         print("usage: python -m testdrive.worker_main <plugin_id>", file=sys.stderr)
         return 1
 
+    # Must happen before any plugin-related import below — those can
+    # pull in arbitrary third-party code (torch, mpi4py, transformers,
+    # a plugin's own vendored repo, ...) that might write to stdout
+    # during import alone, before we ever get to request handling.
+    _protect_stdout()
+
     plugin_id = argv[1]
     _apply_parent_settings()
 
@@ -146,6 +187,14 @@ def main(argv: list[str]) -> int:
         except CacheNotPopulatedError as exc:
             init_error = {"ok": False, "kind": "cache_not_populated", "message": str(exc)}
         except Exception as exc:  # noqa: BLE001
+            # Full traceback to stderr — visible directly (see
+            # _protect_stdout(); this can't corrupt the JSON protocol
+            # pipe) — since the short message alone often isn't enough
+            # to tell where inside vendored plugin code things broke
+            # (e.g. a hardcoded .cuda() call three layers deep in a
+            # submodule constructor, not anywhere near the line that
+            # actually raised).
+            traceback.print_exc(file=sys.stderr)
             init_error = {"ok": False, "kind": "error", "message": f"initialize() failed: {exc}"}
 
         return init_error
@@ -192,6 +241,7 @@ def main(argv: list[str]) -> int:
                 }
             )
         except Exception as exc:  # noqa: BLE001
+            traceback.print_exc(file=sys.stderr)
             _respond({"ok": False, "kind": "error", "message": f"detect() raised: {exc}"})
 
     return 0
