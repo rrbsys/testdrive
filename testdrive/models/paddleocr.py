@@ -3,15 +3,9 @@
 Like ``yunet``, this is fixed-vocabulary rather than open-vocabulary:
 there's exactly one thing it ever reports — a "textblock" — so the
 first word of ``prompt`` must be ``"textblock"`` (case-insensitive) to
-confirm intent, mirroring how ``yunet`` gates on ``"face"``. See that
-module's docstring for the general pattern.
-
-An optional second word restricts detection to a single language, e.g.
-``"textblock en"`` or ``"textblock zh"``. Supported codes are listed in
-``PLUGIN["languages"]``; the default (when omitted) is
-``PLUGIN["language"]`` (``"en"``). ``"de-not_implemented_yet"`` is
-accepted as a prompt but currently falls back with a warning — see
-below.
+confirm intent, mirroring how ``yunet`` gates on ``"face"``. An optional
+second word restricts to a language (``en``/``zh``/...). Prompt ``"ocr"``
+is a text task that dumps all recognized lines (see ``PLUGIN["tasks"]``).
 
 Unlike a normal fixed-vocabulary detector though, each detection's
 *label* isn't just the class name — the framework's annotate.py
@@ -87,7 +81,18 @@ PLUGIN_API = 1
 os.environ.setdefault("PADDLE_PDX_CACHE_HOME", str(cache_dir() / "models" / "paddleocr"))
 (cache_dir() / "models" / "paddleocr").mkdir(parents=True, exist_ok=True)
 
-# The only class this plugin ever honors — see the module docstring.
+# Wine / some Windows setups: oneDNN + PIR crashes with
+#   NotImplementedError: ConvertPirAttribute2RuntimeAttribute not support
+#   [pir::ArrayAttribute<pir::DoubleAttribute>]
+# (see onednn_instruction.cc)
+# Must be set before paddle/paddleocr import. paddlex may still force
+# FLAGS_enable_pir_api=1 when device_type=cpu; enable_mkldnn=False is the real fix.
+os.environ["FLAGS_use_mkldnn"] = "0"
+os.environ["FLAGS_enable_pir_api"] = "0"
+os.environ["FLAGS_enable_pir_in_executor"] = "0"
+os.environ["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] = "0"
+
+# The only prompt this plugin ever honors — see the module docstring.
 _TEXTBLOCK_PROMPT = "textblock"
 
 # Greedy-NMS overlap threshold for merging multiple pipelines' candidate
@@ -114,13 +119,12 @@ PLUGIN = {
     "description": (
         "OCR-based text block detection using PaddleOCR's PP-OCRv4 pipeline. "
         "Fixed single-class vocabulary — it only detects text blocks, so "
-        "the first word of 'prompt' must be 'textblock' to confirm intent "
-        "(any other first word reports nothing, with a warning). An optional "
-        "second word restricts to one language (e.g. 'textblock en'). Each "
-        "box's label is 'textblock:<lang>' (e.g. 'textblock:en'), following "
-        "the repo's <class>:<attribute> labeling convention, with score as "
-        "OCR confidence. Currently English/Chinese only — see module "
-        "docstring re: German."
+        "'prompt' isn't an open-vocabulary description; it must simply be "
+        "'textblock' to confirm intent (any other prompt reports nothing, "
+        "with a warning). Each box's label is 'textblock:<lang>' (e.g. "
+        "'textblock:en'), following the repo's <class>:<attribute> "
+        "labeling convention, with score as OCR confidence. Currently "
+        "English/Chinese only — see module docstring re: German."
     ),
     "author": "PaddlePaddle / Baidu",
     "homepage": "https://github.com/PaddlePaddle/PaddleOCR",
@@ -132,7 +136,6 @@ PLUGIN = {
         "text block detection",
         "en/zh recognition in one image",
         "per-box language label + OCR confidence",
-        "optional language filter via prompt second word",
     ],
     "requirements": [
         {"pip": "Pillow", "module": "PIL"},
@@ -151,6 +154,9 @@ PLUGIN = {
     "classes": [_TEXTBLOCK_PROMPT],
     "language": "en",
     "languages": ["en", "zh", "de-not_implemented_yet"],
+    "tasks": {
+        "ocr": "ocr",
+    },
 }
 
 
@@ -185,12 +191,7 @@ def _iou(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
 
 
 def _parse_prompt(prompt: str) -> tuple[str, str | None]:
-    """Split ``prompt`` into (class, optional_language).
-
-    First word must be ``textblock`` (case-insensitive). Optional second
-    word is a language code from ``PLUGIN["languages"]``. Extra words are
-    ignored with a warning.
-    """
+    """Split ``prompt`` into (class, optional_language)."""
     parts = prompt.strip().split()
     if not parts:
         return "", None
@@ -233,6 +234,8 @@ class Plugin(DetectorPlugin):
             use_doc_unwarping=False,
             use_textline_orientation=False,
             ocr_version="PP-OCRv4",
+            enable_mkldnn=False,  # required: oneDNN + PIR crashes under Wine/Win
+            device="cpu",
         )
         self._ocr_cjk = PaddleOCR(lang="ch", **common_kwargs)
 
@@ -266,16 +269,38 @@ class Plugin(DetectorPlugin):
                 out.append(Detection(label=label, score=score, bbox=(x1, y1, x2, y2)))
         return out
 
+
+    def _collect_texts(self, img_bgr: Any) -> list[str]:
+        """Return every recognized text line from the image (no threshold)."""
+        texts_out: list[str] = []
+        for page in self._ocr_cjk.predict(input=img_bgr):
+            for text in page["rec_texts"]:
+                t = str(text).strip()
+                if t:
+                    texts_out.append(t)
+        return texts_out
+
+    def run_task(self, image: "PILImage.Image", task_prompt: str) -> str:
+        """Dump every OCR line found in the image (prompt ``ocr``)."""
+        if not self._initialized:
+            self.initialize()
+
+        import cv2
+        import numpy as np
+
+        img_bgr = cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2BGR)
+        texts = self._collect_texts(img_bgr)
+        log.debug("run_task(%s): %d text line(s)", task_prompt, len(texts))
+        return "\n".join(texts)
+
     def detect(
         self, image: "PILImage.Image", prompt: str, threshold: float = 0.5
     ) -> list[Detection]:
         """Detect text blocks and label each with its language + OCR confidence.
 
-        The first word of ``prompt`` must be ``"textblock"``
-        (case-insensitive). An optional second word restricts results
-        to that language only (``en``, ``zh``, or the placeholder
-        ``de-not_implemented_yet``). Anything else never matches, with a
-        warning logged rather than raising, matching ``yunet``/``yolo11``'s
+        ``prompt`` must be ``"textblock"`` (case-insensitive) — see the
+        module docstring. Anything else never matches, with a warning
+        logged rather than raising, matching ``yunet``/``yolo11``'s
         handling of an unknown class/prompt so a loop-mode run over
         several plugins doesn't blow up on a prompt that just isn't
         this plugin's.
@@ -292,8 +317,6 @@ class Plugin(DetectorPlugin):
             )
             return []
 
-        # Prefer manifest fields (populated from PLUGIN via from_dict);
-        # fall back to the module-level PLUGIN dict for safety.
         languages: list[str] = (
             list(self.manifest.languages)
             if self.manifest.languages
@@ -316,7 +339,6 @@ class Plugin(DetectorPlugin):
                     "falling back to auto-detect (en/zh)"
                 )
                 force_lang = None
-            # else: force_lang is "en" or "zh" — keep it
 
         import cv2
         import numpy as np
@@ -327,10 +349,6 @@ class Plugin(DetectorPlugin):
         # module docstring re: German. Kept as a list + NMS pass rather
         # than a single flat call so a second pipeline can be added
         # back with a one-line append once German is unblocked upstream.
-        #
-        # When force_lang is set we still run the same pipeline (it is
-        # the only one available) and then filter to the requested
-        # language after recognition.
         candidates = self._run_pipeline(
             self._ocr_cjk, img_bgr, fixed_label=None, threshold=threshold
         )

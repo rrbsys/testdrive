@@ -276,6 +276,39 @@ class WorkerHandle:
             missing=response.get("missing"),
         )
 
+    def task(self, image_path: Path, task_prompt: str, model: str | None) -> str:
+        """Run a text-output task (see PluginManifest.tasks / run_task)."""
+        if self._proc.stdin is None or self._proc.stdout is None:  # pragma: no cover
+            raise WorkerError("error", f"worker for '{self.plugin_id}' has no stdin/stdout pipes")
+
+        request = {
+            "cmd": "task",
+            "image_path": str(image_path),
+            "task_prompt": task_prompt,
+            "model": model,
+        }
+        try:
+            self._proc.stdin.write(json.dumps(request) + "\n")
+            self._proc.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
+            raise WorkerError(
+                "error", f"worker for '{self.plugin_id}' is no longer running: {exc}"
+            ) from exc
+
+        line = self._proc.stdout.readline()
+        if not line:
+            raise WorkerError("error", f"worker for '{self.plugin_id}' exited unexpectedly")
+
+        response = json.loads(line)
+        if response.get("ok"):
+            return str(response.get("text_result", ""))
+
+        raise WorkerError(
+            response.get("kind", "error"),
+            response.get("message", "unknown worker error"),
+            missing=response.get("missing"),
+        )
+
     def shutdown(self) -> None:
         if self._proc.poll() is not None:
             return  # already exited
