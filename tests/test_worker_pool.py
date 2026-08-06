@@ -51,8 +51,10 @@ def test_provision_plugin_env_runs_venv_then_pip_upgrade_then_installs():
 
     with tempfile.TemporaryDirectory() as td:
         env_dir = Path(td) / "envs" / "newenv"
-        python_path = env_dir / ("Scripts" if os.name == "nt" else "bin") / (
-            "python.exe" if os.name == "nt" else "python"
+        python_path = (
+            env_dir
+            / ("Scripts" if os.name == "nt" else "bin")
+            / ("python.exe" if os.name == "nt" else "python")
         )
 
         calls = []
@@ -67,8 +69,13 @@ def test_provision_plugin_env_runs_venv_then_pip_upgrade_then_installs():
         try:
             with mock.patch("subprocess.run", side_effect=fake_run):
                 _provision_plugin_env(
-                    "yolo11", "newenv", env_dir, python_path,
-                    ["torch>=2.2", "ultralytics>=8.3"], "", [],
+                    "yolo11",
+                    "newenv",
+                    env_dir,
+                    python_path,
+                    ["torch>=2.2", "ultralytics>=8.3"],
+                    "",
+                    [],
                 )
         finally:
             set_pyenv_pip_upgrade(True)  # restore default
@@ -115,7 +122,9 @@ def test_provision_plugin_env_skips_pip_upgrade_when_disabled():
         set_pyenv_pip_upgrade(False)
         try:
             with mock.patch("subprocess.run", side_effect=fake_run):
-                _provision_plugin_env("yolo11", "newenv", env_dir, python_path, ["ultralytics>=8.3"], "", [])
+                _provision_plugin_env(
+                    "yolo11", "newenv", env_dir, python_path, ["ultralytics>=8.3"], "", []
+                )
         finally:
             set_pyenv_pip_upgrade(True)
 
@@ -181,9 +190,13 @@ def test_provision_plugin_env_marker_write_failure_is_non_fatal():
         def fake_write_text(self, *a, **kw):
             raise OSError("disk full")
 
-        with mock.patch("subprocess.run", side_effect=fake_run), \
-             mock.patch.object(Path, "write_text", fake_write_text):
-            _provision_plugin_env("yolo11", "newenv", env_dir, python_path, [], "", [])  # must not raise
+        with (
+            mock.patch("subprocess.run", side_effect=fake_run),
+            mock.patch.object(Path, "write_text", fake_write_text),
+        ):
+            _provision_plugin_env(
+                "yolo11", "newenv", env_dir, python_path, [], "", []
+            )  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +256,8 @@ def test_pool_get_provisions_then_spawns_worker():
     from testdrive.worker_pool import WorkerPool
 
     manifest = PluginManifest(
-        id="yolo11", pyenv="newenv",
+        id="yolo11",
+        pyenv="newenv",
         requirements=[{"pip": "ultralytics>=8.3", "module": "ultralytics"}],
         pip_options="--no-build-isolation",
     )
@@ -255,8 +269,16 @@ def test_pool_get_provisions_then_spawns_worker():
 
         provisioned = {}
 
-        def fake_provision(plugin_id, pyenv_name, env_directory, python_path, requirements, pip_options, patches):
-            provisioned["called"] = (plugin_id, pyenv_name, tuple(requirements), pip_options, tuple(patches))
+        def fake_provision(
+            plugin_id, pyenv_name, env_directory, python_path, requirements, pip_options, patches
+        ):
+            provisioned["called"] = (
+                plugin_id,
+                pyenv_name,
+                tuple(requirements),
+                pip_options,
+                tuple(patches),
+            )
             python_path.parent.mkdir(parents=True, exist_ok=True)
             python_path.touch()  # pretend the venv now exists
 
@@ -264,8 +286,10 @@ def test_pool_get_provisions_then_spawns_worker():
 
         provision_target = "testdrive.worker_pool._provision_plugin_env"
         handle_target = "testdrive.worker_pool.WorkerHandle"
-        with mock.patch(provision_target, side_effect=fake_provision), \
-             mock.patch(handle_target, return_value=fake_handle) as mock_handle:
+        with (
+            mock.patch(provision_target, side_effect=fake_provision),
+            mock.patch(handle_target, return_value=fake_handle),
+        ):
             pool = WorkerPool()
             handle = pool.get("yolo11", manifest, cd)
 
@@ -273,7 +297,13 @@ def test_pool_get_provisions_then_spawns_worker():
         # id, not any path-shaped ref — and the plugin's own pinned
         # requirements/pip_options are what actually gets installed now,
         # not a pyproject.toml extras name.
-        assert provisioned["called"] == ("yolo11", "newenv", ("ultralytics>=8.3",), "--no-build-isolation", ())
+        assert provisioned["called"] == (
+            "yolo11",
+            "newenv",
+            ("ultralytics>=8.3",),
+            "--no-build-isolation",
+            (),
+        )
         assert handle is fake_handle
         # Second call for the same plugin reuses the cached handle —
         # no second provisioning call.
@@ -306,15 +336,21 @@ def test_pool_get_spawns_worker_with_raw_ref_not_manifest_id():
 
         provisioned = {}
 
-        def fake_provision(plugin_id, pyenv_name, env_directory, python_path, requirements, pip_options, patches):
+        def fake_provision(
+            plugin_id, pyenv_name, env_directory, python_path, requirements, pip_options, patches
+        ):
             provisioned["called"] = (plugin_id, pyenv_name)
             python_path.parent.mkdir(parents=True, exist_ok=True)
             python_path.touch()
 
         fake_handle = object()
 
-        with mock.patch("testdrive.worker_pool._provision_plugin_env", side_effect=fake_provision), \
-             mock.patch("testdrive.worker_pool.WorkerHandle", return_value=fake_handle) as mock_handle:
+        with (
+            mock.patch("testdrive.worker_pool._provision_plugin_env", side_effect=fake_provision),
+            mock.patch(
+                "testdrive.worker_pool.WorkerHandle", return_value=fake_handle
+            ) as mock_handle,
+        ):
             pool = WorkerPool()
             handle = pool.get("../models_inactive/seem", manifest, cd)
 
@@ -371,7 +407,8 @@ def test_provision_plugin_env_real_venv_end_to_end():
     base_python = getattr(sys, "_base_executable", None) or sys.executable
     probe = _subprocess.run(
         [base_python, "-c", "import setuptools, wheel"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     if probe.returncode != 0:
         pytest.skip(
@@ -393,8 +430,10 @@ def test_provision_plugin_env_real_venv_end_to_end():
 
     with tempfile.TemporaryDirectory() as td:
         env_dir = Path(td) / "pyenv" / sys.platform / "newenv"
-        python_path = env_dir / ("Scripts" if os.name == "nt" else "bin") / (
-            "python.exe" if os.name == "nt" else "python"
+        python_path = (
+            env_dir
+            / ("Scripts" if os.name == "nt" else "bin")
+            / ("python.exe" if os.name == "nt" else "python")
         )
 
         real_run = subprocess.run
@@ -412,7 +451,13 @@ def test_provision_plugin_env_real_venv_end_to_end():
         try:
             with mock.patch("subprocess.run", side_effect=run_offline_friendly):
                 worker_pool._provision_plugin_env(
-                    "core-only-test", "newenv", env_dir, python_path, [], "", [],
+                    "core-only-test",
+                    "newenv",
+                    env_dir,
+                    python_path,
+                    [],
+                    "",
+                    [],
                 )
 
             assert python_path.exists()
@@ -420,7 +465,8 @@ def test_provision_plugin_env_real_venv_end_to_end():
 
             check = subprocess.run(
                 [str(python_path), "-c", "import testdrive; print(testdrive.__name__)"],
-                capture_output=True, text=True,
+                capture_output=True,
+                text=True,
             )
             assert check.returncode == 0
             assert check.stdout.strip() == "testdrive"

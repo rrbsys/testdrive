@@ -120,21 +120,27 @@ def _provision_plugin_env(
         _announce(f"creating venv at {env_directory} ...")
         subprocess.run(
             [sys.executable, "-m", "venv", str(env_directory)],
-            check=True, capture_output=True, text=True,
+            check=True,
+            capture_output=True,
+            text=True,
         )
 
         if get_pyenv_pip_upgrade():
             _announce(f"installing via {python_path} -m pip install --upgrade pip")
             subprocess.run(
                 [str(python_path), "-m", "pip", "install", "--upgrade", "pip"],
-                check=True, capture_output=True, text=True,
+                check=True,
+                capture_output=True,
+                text=True,
             )
 
         project_root = _project_root()
         _announce(f"installing via {python_path} -m pip install -e {project_root}")
         subprocess.run(
             [str(python_path), "-m", "pip", "install", "-e", str(project_root)],
-            check=True, capture_output=True, text=True,
+            check=True,
+            capture_output=True,
+            text=True,
         )
 
         run_pip_install(python_path, requirements, pip_options, patches, announce=_announce)
@@ -146,7 +152,8 @@ def _provision_plugin_env(
         ) from exc
     except (OSError, RuntimeError) as exc:
         raise WorkerError(
-            "error", f"could not set up '{pyenv_name}' environment for plugin '{plugin_id}': {exc}",
+            "error",
+            f"could not set up '{pyenv_name}' environment for plugin '{plugin_id}': {exc}",
         ) from exc
 
     try:
@@ -177,7 +184,9 @@ class WorkerHandle:
         env = os.environ.copy()
         env["TESTDRIVE_WORKER_DOWNLOADS_ALLOWED"] = "1" if get_downloads_allowed() else "0"
         max_parallel = get_max_parallel_files()
-        env["TESTDRIVE_WORKER_MAX_PARALLEL_FILES"] = str(max_parallel) if max_parallel is not None else ""
+        env["TESTDRIVE_WORKER_MAX_PARALLEL_FILES"] = (
+            str(max_parallel) if max_parallel is not None else ""
+        )
 
         self._proc = subprocess.Popen(
             [str(python_path), "-m", "testdrive.worker_main", plugin_ref],
@@ -205,7 +214,9 @@ class WorkerHandle:
             self._proc.stdin.write(json.dumps(request) + "\n")
             self._proc.stdin.flush()
         except (BrokenPipeError, OSError) as exc:
-            raise WorkerError("error", f"worker for '{self.plugin_id}' is no longer running: {exc}") from exc
+            raise WorkerError(
+                "error", f"worker for '{self.plugin_id}' is no longer running: {exc}"
+            ) from exc
 
         line = self._proc.stdout.readline()
         if not line:
@@ -222,7 +233,11 @@ class WorkerHandle:
         )
 
     def detect(
-        self, image_path: Path, prompt: str, threshold: float, model: str | None,
+        self,
+        image_path: Path,
+        prompt: str,
+        threshold: float,
+        model: str | None,
     ) -> list["Detection"]:
         from .detection import Detection
 
@@ -240,7 +255,9 @@ class WorkerHandle:
             self._proc.stdin.write(json.dumps(request) + "\n")
             self._proc.stdin.flush()
         except (BrokenPipeError, OSError) as exc:
-            raise WorkerError("error", f"worker for '{self.plugin_id}' is no longer running: {exc}") from exc
+            raise WorkerError(
+                "error", f"worker for '{self.plugin_id}' is no longer running: {exc}"
+            ) from exc
 
         line = self._proc.stdout.readline()
         if not line:
@@ -327,8 +344,13 @@ class WorkerPool:
                         f"    {hint}",
                     )
                 _provision_plugin_env(
-                    plugin_id, pyenv_name, env_dir(cd, pyenv_name), python_path,
-                    requirements, manifest.pip_options, manifest.patches,
+                    plugin_id,
+                    pyenv_name,
+                    env_dir(cd, pyenv_name),
+                    python_path,
+                    requirements,
+                    manifest.pip_options,
+                    manifest.patches,
                 )
                 if not python_path.exists():  # pragma: no cover — defensive
                     raise WorkerError(

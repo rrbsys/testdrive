@@ -734,9 +734,7 @@ def test_ensure_git_repo_second_call_is_a_no_op():
         with mock.patch("subprocess.run", side_effect=fake_run):
             ensure_git_repo("https://example.com/x.git", "abc123", cd, "seem")
 
-        with mock.patch(
-            "subprocess.run", side_effect=AssertionError("must not clone again")
-        ):
+        with mock.patch("subprocess.run", side_effect=AssertionError("must not clone again")):
             result = ensure_git_repo("https://example.com/x.git", "abc123", cd, "seem")
         assert result == cd / "repos" / "seem"
 

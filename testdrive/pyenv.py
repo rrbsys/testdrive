@@ -202,7 +202,9 @@ def apply_source_patches(
     site_packages = Path(
         subprocess.run(
             [str(python_path), "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
-            check=True, capture_output=True, text=True,
+            check=True,
+            capture_output=True,
+            text=True,
         ).stdout.strip()
     )
 

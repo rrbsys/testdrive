@@ -93,7 +93,9 @@ class Plugin(DetectorPlugin):
 
         cd = cache_dir()
         checkpoint = download_file(
-            _MODEL_URL, cd / "checkpoints" / "yunet", filename=_MODEL_FILENAME,
+            _MODEL_URL,
+            cd / "checkpoints" / "yunet",
+            filename=_MODEL_FILENAME,
         )
 
         log.info("loading YuNet...")
@@ -113,7 +115,9 @@ class Plugin(DetectorPlugin):
         self._initialized = True
         log.info("YuNet ready")
 
-    def detect(self, image: "PILImage.Image", prompt: str, threshold: float = 0.3) -> list[Detection]:
+    def detect(
+        self, image: "PILImage.Image", prompt: str, threshold: float = 0.3
+    ) -> list[Detection]:
         """Detect faces.
 
         ``prompt`` must be ``"face"`` (case-insensitive) — see the
@@ -129,7 +133,8 @@ class Plugin(DetectorPlugin):
         if prompt.strip().lower() != _FACE_PROMPT:
             log.warning(
                 "yunet only detects '%s'; prompt '%s' will never match",
-                _FACE_PROMPT, prompt,
+                _FACE_PROMPT,
+                prompt,
             )
             return []
 
@@ -154,11 +159,13 @@ class Plugin(DetectorPlugin):
                 y1 = max(0, int(round(y)))
                 x2 = min(width, int(round(x + w)))
                 y2 = min(height, int(round(y + h)))
-                detections.append(Detection(
-                    label=_FACE_PROMPT,
-                    score=score,
-                    bbox=(x1, y1, x2, y2),
-                ))
+                detections.append(
+                    Detection(
+                        label=_FACE_PROMPT,
+                        score=score,
+                        bbox=(x1, y1, x2, y2),
+                    )
+                )
 
         log.debug("detect: %d detection(s) above threshold %.2f", len(detections), threshold)
         return detections

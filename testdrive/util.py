@@ -254,7 +254,11 @@ def ensure_local_repo(repo: str, cd: Path, plugin_id: str) -> Path:
 
 
 def load_processor(
-    repo: str, cd: Path, plugin_id: str, processor_class: type[Any] | None = None, **kwargs: Any,
+    repo: str,
+    cd: Path,
+    plugin_id: str,
+    processor_class: type[Any] | None = None,
+    **kwargs: Any,
 ) -> Any:
     """Robust processor loader with multiple fallbacks.
 

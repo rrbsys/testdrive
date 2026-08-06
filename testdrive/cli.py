@@ -145,7 +145,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="for plugins with their own environment (manifest 'pyenv' != \"framework\"): "
         "don't automatically create/pip-install it on first -T/-TT use — set it up by "
-        "hand instead. No effect on plugins using the default \"framework\" environment.",
+        'hand instead. No effect on plugins using the default "framework" environment.',
     )
     parser.add_argument(
         "--pyenv-pip-upgrade",
@@ -499,7 +499,9 @@ def _run_detect_one(
                 f"plugin '{plugin_id}' is missing dependencies:\n    "
                 + "\n    ".join(missing)
                 + "\n\nInstall with:  "
-                + install_hint(cache_dir(), plugin.manifest.pyenv, missing, plugin.manifest.pip_options)
+                + install_hint(
+                    cache_dir(), plugin.manifest.pyenv, missing, plugin.manifest.pip_options
+                )
             )
             return ExitCode.MISSING_DEPENDENCY, None, msg
 
@@ -527,10 +529,14 @@ def _run_detect_one(
     # protocol first if that changes.
     if plugin.manifest.tasks and prompt in plugin.manifest.tasks:
         if uses_worker:
-            return ExitCode.CLI_ERROR, None, (
-                f"plugin '{plugin_id}' declares task '{prompt}', but text tasks aren't "
-                f"supported yet for a plugin with its own pyenv (only \"framework\"-pyenv "
-                f"plugins can run one right now)"
+            return (
+                ExitCode.CLI_ERROR,
+                None,
+                (
+                    f"plugin '{plugin_id}' declares task '{prompt}', but text tasks aren't "
+                    f'supported yet for a plugin with its own pyenv (only "framework"-pyenv '
+                    f"plugins can run one right now)"
+                ),
             )
         try:
             log.info("initializing plugin '%s' ...", plugin_id)
@@ -546,7 +552,11 @@ def _run_detect_one(
                 ),
             )
         except Exception as exc:  # noqa: BLE001
-            return ExitCode.INFERENCE_FAILED, None, f"plugin '{plugin_id}' initialize() failed: {exc}"
+            return (
+                ExitCode.INFERENCE_FAILED,
+                None,
+                f"plugin '{plugin_id}' initialize() failed: {exc}",
+            )
 
         task_prompt = plugin.manifest.tasks[prompt]
         try:
@@ -584,7 +594,9 @@ def _run_detect_one(
             worker = get_pool().get(plugin_id, plugin.manifest, cache_dir())
             log.info(
                 "running detection via '%s' worker: prompt=%r threshold=%.2f",
-                plugin.manifest.pyenv, prompt, threshold,
+                plugin.manifest.pyenv,
+                prompt,
+                threshold,
             )
             t0 = time.perf_counter()
             detections = worker.detect(image_path, prompt, threshold, plugin.manifest.model or None)
@@ -598,14 +610,20 @@ def _run_detect_one(
                     f"'{plugin.manifest.pyenv}' environment:\n    "
                     + "\n    ".join(exc.missing)
                     + "\n\nInstall with:  "
-                    + install_hint(cache_dir(), plugin.manifest.pyenv, exc.missing, plugin.manifest.pip_options)
+                    + install_hint(
+                        cache_dir(), plugin.manifest.pyenv, exc.missing, plugin.manifest.pip_options
+                    )
                 )
                 return ExitCode.MISSING_DEPENDENCY, None, msg
             if exc.kind == "cache_not_populated":
-                return ExitCode.MISSING_DEPENDENCY, None, (
-                    f"plugin '{plugin_id}' needs its model downloaded first ({exc}). "
-                    f"Run `testdrive -T {plugin_id}` (or -TT {plugin_id}) once to populate the "
-                    f"cache, then re-run this command."
+                return (
+                    ExitCode.MISSING_DEPENDENCY,
+                    None,
+                    (
+                        f"plugin '{plugin_id}' needs its model downloaded first ({exc}). "
+                        f"Run `testdrive -T {plugin_id}` (or -TT {plugin_id}) once to populate the "
+                        f"cache, then re-run this command."
+                    ),
                 )
             if exc.kind == "env_not_configured":
                 return ExitCode.PYENV_NOT_CONFIGURED, None, str(exc)
@@ -626,7 +644,11 @@ def _run_detect_one(
                 ),
             )
         except Exception as exc:  # noqa: BLE001
-            return ExitCode.INFERENCE_FAILED, None, f"plugin '{plugin_id}' initialize() failed: {exc}"
+            return (
+                ExitCode.INFERENCE_FAILED,
+                None,
+                f"plugin '{plugin_id}' initialize() failed: {exc}",
+            )
 
         # 5. run inference
         try:
@@ -890,7 +912,10 @@ def _resolve_test_threshold(plugin_id: str, cli_threshold: float | None) -> floa
 
 
 def _run_example_test_one(
-    plugin_id: str, threshold: float | None, output_dir: Path, model_override: str | None = None,
+    plugin_id: str,
+    threshold: float | None,
+    output_dir: Path,
+    model_override: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     """Run one plugin's example test. Returns ``(exit_code, info)`` where
     ``info`` has enough detail for both text and ``--json`` presentation.
@@ -978,7 +1003,9 @@ def cmd_example_test(
     last_exit_code = ExitCode.SUCCESS
 
     for i, plugin_id in enumerate(plugin_ids):
-        exit_code, info = _run_example_test_one(plugin_id, threshold, out_dir, model_override=model_override)
+        exit_code, info = _run_example_test_one(
+            plugin_id, threshold, out_dir, model_override=model_override
+        )
         last_exit_code = exit_code
         if info.get("passed"):
             n_passed += 1
@@ -1085,7 +1112,9 @@ def _dispatch(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
     if ns.example_test:
         set_downloads_allowed(True)  # -TT explicitly populates the cache
         output_dir = Path(ns.output_dir) if ns.output_dir else None
-        return cmd_example_test(ns.example_test, ns.json, ns.threshold, output_dir, model_override=ns.model)
+        return cmd_example_test(
+            ns.example_test, ns.json, ns.threshold, output_dir, model_override=ns.model
+        )
     if ns.selftest:
         set_downloads_allowed(True)  # -T explicitly populates the cache
         if ns.selftest == LOOP_ALL:

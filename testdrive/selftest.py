@@ -190,8 +190,12 @@ def run_selftest(plugin_id: str, model_override: str | None = None) -> SelfTestR
 
                 note = "missing: " + ", ".join(exc.missing)
                 result.add_step("dependencies", ok=False, note=note)
-                hint = install_hint(cache_dir(), plugin.manifest.pyenv, exc.missing, plugin.manifest.pip_options)
-                result.failures.append(f"missing packages: {', '.join(exc.missing)}\nInstall with:  {hint}")
+                hint = install_hint(
+                    cache_dir(), plugin.manifest.pyenv, exc.missing, plugin.manifest.pip_options
+                )
+                result.failures.append(
+                    f"missing packages: {', '.join(exc.missing)}\nInstall with:  {hint}"
+                )
             elif exc.kind == "env_not_configured":
                 result.add_step("environment", ok=False, note=str(exc))
                 result.failures.append(f"environment set up: {exc}")
@@ -235,13 +239,19 @@ def run_selftest(plugin_id: str, model_override: str | None = None) -> SelfTestR
                 )
                 try:
                     run_pip_install(
-                        python_path, requirements, plugin.manifest.pip_options,
-                        plugin.manifest.patches, announce=_announce,
+                        python_path,
+                        requirements,
+                        plugin.manifest.pip_options,
+                        plugin.manifest.patches,
+                        announce=_announce,
                     )
                 except Exception as exc:  # noqa: BLE001 — CalledProcessError or RuntimeError
                     result.add_step("dependencies", ok=False, note=f"auto-install failed: {exc}")
                     hint = install_hint(
-                        cache_dir(), plugin.manifest.pyenv, requirements, plugin.manifest.pip_options
+                        cache_dir(),
+                        plugin.manifest.pyenv,
+                        requirements,
+                        plugin.manifest.pip_options,
                     )
                     result.failures.append(
                         f"could not install dependencies: {exc}\nInstall by hand:  {hint}"
@@ -257,8 +267,12 @@ def run_selftest(plugin_id: str, model_override: str | None = None) -> SelfTestR
             if not installed:
                 note = "missing: " + ", ".join(missing)
                 result.add_step("dependencies", ok=False, note=note)
-                hint = install_hint(cache_dir(), plugin.manifest.pyenv, missing, plugin.manifest.pip_options)
-                result.failures.append(f"missing packages: {', '.join(missing)}\nInstall with:  {hint}")
+                hint = install_hint(
+                    cache_dir(), plugin.manifest.pyenv, missing, plugin.manifest.pip_options
+                )
+                result.failures.append(
+                    f"missing packages: {', '.join(missing)}\nInstall with:  {hint}"
+                )
                 return result
         result.add_step("dependencies", ok=True)
 

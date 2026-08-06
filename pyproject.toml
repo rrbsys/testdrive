@@ -85,6 +85,7 @@ module = [
     "einops.*",
     "timm.*",
     "ultralytics.*",
+    "torchvision.*",
 ]
 ignore_missing_imports = true
 

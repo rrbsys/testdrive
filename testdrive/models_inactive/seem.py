@@ -108,8 +108,10 @@ PLUGIN = {
         {"pip": "kornia==0.7.0", "module": "kornia"},
         {"pip": "opencv-python==4.8.1.78", "module": "cv2"},
         {"pip": "Pillow==9.4.0", "module": "PIL"},
-        {"pip": "detectron2 @ git+https://github.com/MaureenZOU/detectron2-xyz.git",
-         "module": "detectron2"},
+        {
+            "pip": "detectron2 @ git+https://github.com/MaureenZOU/detectron2-xyz.git",
+            "module": "detectron2",
+        },
     ],
     # detectron2-xyz's C++ extension (built above with --no-build-isolation,
     # since its setup.py imports torch directly at build time — see
@@ -368,11 +370,16 @@ class Plugin(DetectorPlugin):
             score = torch.sigmoid(out_prob.max(0)[0]).item()
 
             mask = (
-                F.interpolate(pred_masks_pos[None,], image_size[-2:], mode="bilinear")[
-                    0, :, :height, :width
-                ]
-                > 0.0
-            ).float().cpu().numpy()
+                (
+                    F.interpolate(pred_masks_pos[None,], image_size[-2:], mode="bilinear")[
+                        0, :, :height, :width
+                    ]
+                    > 0.0
+                )
+                .float()
+                .cpu()
+                .numpy()
+            )
 
         if score < threshold:
             return []
