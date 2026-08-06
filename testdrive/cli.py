@@ -249,6 +249,11 @@ def _print_manifest_text(m: PluginManifest) -> None:
         for name, token in m.tasks.items():
             print(f"    {name.ljust(width)}  ->  {token}")
         print()
+    if m.languages:
+        print(f"Languages      : {', '.join(m.languages)}")
+        if m.language:
+            print(f"Default lang   : {m.language}")
+        print()
     if m.sample_prompt:
         print(f'Sample prompt  : "{m.sample_prompt}"')
 
