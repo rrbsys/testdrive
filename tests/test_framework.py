@@ -956,13 +956,26 @@ def test_gdino_selftest_missing_deps():
     test disguised as a fast unit test. Mocking is_installed() directly
     makes this deterministic and fast regardless of what's actually
     installed.
+
+    Auto-provision is disabled for this test: when deps are missing the
+    self-test would otherwise try to ``pip install`` into the framework
+    pyenv (which does not exist in CI), producing an "auto-install
+    failed" message instead of the "missing packages" path we want to
+    assert on.
     """
     import unittest.mock as mock
-    from testdrive.selftest import run_selftest
     from testdrive.models.groundingdino import Plugin
+    from testdrive.selftest import run_selftest
+    from testdrive.util import set_auto_provision_enabled
 
-    with mock.patch.object(Plugin, "is_installed", return_value=(False, ["torch", "transformers"])):
-        result = run_selftest("groundingdino")
+    set_auto_provision_enabled(False)
+    try:
+        with mock.patch.object(
+            Plugin, "is_installed", return_value=(False, ["torch", "transformers"])
+        ):
+            result = run_selftest("groundingdino")
+    finally:
+        set_auto_provision_enabled(True)
 
     assert not result.passed
     dep_step = next((s for s in result.steps if "dependencies" in s), None)

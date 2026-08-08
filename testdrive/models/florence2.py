@@ -32,7 +32,7 @@ PLUGIN = {
     "supports": ["text prompts", "object detection", "captioning"],
     "requirements": [
         {"pip": "Pillow", "module": "PIL"},
-        {"pip": "torch>=2.2", "module": "torch"},
+        {"pip": "torch>=2.2,<2.5", "module": "torch"},
         {"pip": "transformers==4.50.3", "module": "transformers"},
         {"pip": "einops", "module": "einops"},
         {"pip": "timm", "module": "timm"},

@@ -26,9 +26,10 @@ classifiers = [
 ]
 dependencies = [
     "Pillow>=10.0",  # currently the only requirement for cli/framework
+    "certifi>=2024.0",  # CA bundle for download_file() on hosts with incomplete system trust stores (e.g. Win 8.1)
     # put the following very general restrictions somewhere if you know a better place...
     "Numpy~=1.0; python_version=='3.11'",  # lots of 3.11 modules can't live with numpy 2.x
-    "Torch<2.5; sys_platform=='win32'",    # uncomment for wine11 on mac only
+    # "Torch<2.5; sys_platform=='win32'",    # uncomment for wine11 on mac only
 ]
 
 [project.optional-dependencies]
@@ -46,7 +47,12 @@ dependencies = [
 # pip_options flag like seem's --no-build-isolation, or its ordered
 # source patch — see seem.py) — it was never anything more than a
 # hand-maintained mirror of what's now the single source of truth.
-dev = ["pytest>=7.0", "ruff>=0.4", "mypy>=1.8"]
+dev = [
+    "pytest>=7.0", 
+    "ruff>=0.4,<0.16",
+    "mypy>=1.8",
+    "numpy",  # for CI
+]
 
 [project.scripts]
 testdrive = "testdrive.cli:entrypoint"
@@ -86,6 +92,7 @@ module = [
     "timm.*",
     "ultralytics.*",
     "torchvision.*",
+    "cv2",
 ]
 ignore_missing_imports = true
 

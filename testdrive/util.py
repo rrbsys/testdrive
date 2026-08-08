@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from typing import Any
+import ssl
 
 log = logging.getLogger("testdrive.util")
 
@@ -309,6 +310,24 @@ def load_model(repo: str, cd: Path, plugin_id: str, model_class: type[Any], **kw
     return model_class.from_pretrained(local, **kwargs)
 
 
+def _ssl_context() -> "ssl.SSLContext":
+    """Build an SSL context that works on hosts with an incomplete system
+    CA store (notably older Windows, e.g. 8.1 under corporate roots).
+
+    Prefers ``certifi``'s Mozilla CA bundle when installed; falls back to
+    the platform default context otherwise. Callers that hit
+    ``CERTIFICATE_VERIFY_FAILED`` without certifi should
+    ``pip install certifi`` into the relevant pyenv.
+    """
+
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
+
+
 def download_file(url: str, dest_dir: Path, filename: str | None = None) -> Path:
     """Download a plain file (not from the HF hub) into ``dest_dir``.
 
@@ -320,7 +339,14 @@ def download_file(url: str, dest_dir: Path, filename: str | None = None) -> Path
     Downloads to a ``.part`` file first and only renames it into place on
     success, so an interrupted download can't leave a corrupt file that
     looks "already downloaded" on the next run.
+
+    Uses :func:`_ssl_context` so TLS verification works on hosts whose
+    system CA store is incomplete (Windows 8.1 is a common case) when
+    ``certifi`` is installed.
     """
+    import shutil
+    import ssl
+    import urllib.error
     import urllib.request
 
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -336,8 +362,25 @@ def download_file(url: str, dest_dir: Path, filename: str | None = None) -> Path
     log.info("downloading %s -> %s", url, dest)
     tmp = dest.with_name(dest.name + ".part")
     try:
-        urllib.request.urlretrieve(url, tmp)
+        ctx = _ssl_context()
+        with urllib.request.urlopen(url, context=ctx) as resp:
+            with open(tmp, "wb") as out:
+                shutil.copyfileobj(resp, out)
         tmp.replace(dest)
+    except urllib.error.URLError as exc:
+        tmp.unlink(missing_ok=True)
+        # Surface a actionable hint when the failure is the common
+        # "broken system CA store" case on older Windows.
+        err = str(exc.reason) if getattr(exc, "reason", None) else str(exc)
+        if "CERTIFICATE_VERIFY_FAILED" in err or isinstance(
+            getattr(exc, "reason", None), ssl.SSLError
+        ):
+            raise urllib.error.URLError(
+                f"{exc.reason}; install certifi into this environment "
+                f"(pip install certifi) so downloads can use Mozilla's CA "
+                f"bundle instead of the system store"
+            ) from exc
+        raise
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise

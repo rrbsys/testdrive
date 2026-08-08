@@ -393,7 +393,8 @@ def test_provision_plugin_env_real_venv_end_to_end():
 
     # This test builds --system-site-packages + --no-build-isolation +
     # --no-index specifically to avoid the network — but that only works
-    # if setuptools/wheel (this project's build backend) are importable
+    # if setuptools/wheel (this project's build backend) and certifi
+    # (this project's runtime dependency) are importable
     # from whatever "system site packages" the *new* venv actually gets.
     #
     # Crucially, that is NOT necessarily this process's own site-packages:
@@ -406,18 +407,18 @@ def test_provision_plugin_env_real_venv_end_to_end():
     # importlib.util.find_spec() in this process.
     base_python = getattr(sys, "_base_executable", None) or sys.executable
     probe = _subprocess.run(
-        [base_python, "-c", "import setuptools, wheel"],
+        [base_python, "-c", "import setuptools, wheel, certifi"],
         capture_output=True,
         text=True,
     )
     if probe.returncode != 0:
         pytest.skip(
-            f"setuptools/wheel not importable from the base interpreter "
+            f"setuptools/wheel/certifi not importable from the base interpreter "
             f"({base_python}) — needed because a --system-site-packages venv "
-            "links to the *base* interpreter's site-packages, not the "
+            "links to the base interpreter's site-packages, not the "
             "currently active venv's, even when created from inside one. "
             f"Install them there directly (e.g. `{base_python} -m pip install "
-            "setuptools wheel`), or run this test with network access instead, "
+            "setuptools wheel certifi`), or run this test with network access instead, "
             "where the unmodified, non-offline path is exercised."
         )
 
