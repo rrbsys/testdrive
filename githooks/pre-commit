@@ -1,0 +1,31 @@
+#!/bin/sh
+# Mirrors the "test" job in .github/workflows/ci.yml — same four
+# commands, same order — so a failing commit locally is exactly what
+# would fail CI, not a subset or a different check.
+#
+# Runs on Windows too: Git for Windows executes hooks with its bundled
+# MSYS bash regardless of platform, so this one script is enough for
+# both — no separate .bat/.ps1 needed, and no risk of the two drifting
+# apart the way check.bat/check.sh could.
+#
+# Installed via `core.hooksPath` (see README/CONTRIBUTING for the
+# one-time setup command) rather than living directly in .git/hooks/,
+# because .git/hooks/ is never committed — every clone (including CI
+# itself, and your Mac + Windows checkouts of the same Z:\ drive) would
+# otherwise need this pasted in by hand and kept in sync manually.
+
+set -e
+
+echo "[pre-commit] ruff check ."
+ruff check .
+
+echo "[pre-commit] ruff format --check ."
+ruff format --check .
+
+echo "[pre-commit] mypy testdrive/"
+mypy testdrive/
+
+echo "[pre-commit] pytest -v"
+pytest -v
+
+echo "[pre-commit] all checks passed"
