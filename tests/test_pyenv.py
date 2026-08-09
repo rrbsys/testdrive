@@ -224,6 +224,9 @@ def test_ensure_framework_env_noop_when_already_in_env():
 
 
 def test_ensure_framework_env_relaunches_when_target_exists():
+    """POSIX path: a true os.execve — never returns, no exit code of its
+    own (the *relaunched* process's own exit is what ultimately matters).
+    """
     import testdrive.pyenv as pyenv
 
     cd = Path("/some/cache")
@@ -242,18 +245,87 @@ def test_ensure_framework_env_relaunches_when_target_exists():
 
     with (
         mock.patch.object(sys, "argv", ["testdrive"]),
+        mock.patch.object(pyenv.sys, "platform", "linux"),
         mock.patch.object(pyenv, "is_in_env", return_value=False),
         mock.patch.object(pyenv.Path, "exists", return_value=True),
         mock.patch.object(pyenv.os, "execve", side_effect=fake_execve),
     ):
         exit_code, stderr = _run_ensure(cd)
+        expected_target = str(pyenv.env_python_path(cd))
 
     assert exit_code is None
     assert captured["env"][pyenv._RELAUNCH_MARKER] == "1"
-    assert str(pyenv.env_python_path(cd)) == captured["path"]
+    assert expected_target == captured["path"]
     assert captured["argv"][0] == captured["path"]
     assert captured["argv"][1:] == ["-m", "testdrive"]
     assert "relaunching" in stderr
+
+
+def test_ensure_framework_env_relaunches_synchronously_on_windows():
+    """Windows path: must NOT use os.execve (see the docstring's platform
+    note — it's fire-and-forget there, letting whatever launched us regain
+    control before the real run finishes). Must instead block on a real
+    child process and propagate its exact exit code via sys.exit.
+    """
+    import testdrive.pyenv as pyenv
+
+    cd = Path("/some/cache")
+    os.environ.pop(pyenv._SKIP_ENV_VAR, None)
+    os.environ.pop(pyenv._RELAUNCH_MARKER, None)
+
+    captured = {}
+
+    class FakeCompleted:
+        returncode = 7
+
+    def fake_run(argv, env=None, **kwargs):
+        captured["argv"] = argv
+        captured["env"] = env
+        return FakeCompleted()
+
+    boom = AssertionError("must not use os.execve on win32")
+
+    with (
+        mock.patch.object(sys, "argv", ["testdrive"]),
+        mock.patch.object(pyenv.sys, "platform", "win32"),
+        mock.patch.object(pyenv, "is_in_env", return_value=False),
+        mock.patch.object(pyenv.Path, "exists", return_value=True),
+        mock.patch.object(pyenv.os, "execve", side_effect=boom),
+        mock.patch("subprocess.run", side_effect=fake_run),
+    ):
+        exit_code, stderr = _run_ensure(cd)
+        expected_target = str(pyenv.env_python_path(cd))
+
+    assert exit_code == 7
+    assert captured["env"][pyenv._RELAUNCH_MARKER] == "1"
+    assert captured["argv"][0] == expected_target
+    assert captured["argv"][1:] == ["-m", "testdrive"]
+    assert "relaunching" in stderr
+
+
+def test_ensure_framework_env_windows_relaunch_oserror_falls_back_to_instructions():
+    import testdrive.pyenv as pyenv
+
+    cd = Path("/some/cache")
+    os.environ.pop(pyenv._SKIP_ENV_VAR, None)
+    os.environ.pop(pyenv._RELAUNCH_MARKER, None)
+
+    def fake_run(*a, **kw):
+        raise OSError("no such file")
+
+    with (
+        mock.patch.object(pyenv.sys, "platform", "win32"),
+        mock.patch.object(pyenv, "is_in_env", return_value=False),
+        mock.patch.object(pyenv.Path, "exists", return_value=True),
+        mock.patch("subprocess.run", side_effect=fake_run),
+    ):
+        exit_code, stderr = _run_ensure(cd)
+
+    from testdrive.util import ExitCode
+
+    assert exit_code == ExitCode.PYENV_NOT_CONFIGURED
+    assert "could not relaunch" in stderr
+    assert "pip install -e ." in stderr
 
 
 def test_ensure_framework_env_missing_env_prints_setup_instructions():
@@ -288,6 +360,7 @@ def test_ensure_framework_env_execve_oserror_falls_back_to_instructions():
         raise OSError("no such file")
 
     with (
+        mock.patch.object(pyenv.sys, "platform", "linux"),
         mock.patch.object(pyenv, "is_in_env", return_value=False),
         mock.patch.object(pyenv.Path, "exists", return_value=True),
         mock.patch.object(pyenv.os, "execve", side_effect=fake_execve),
@@ -344,6 +417,7 @@ def test_ensure_framework_env_relaunch_argv_forwards_cli_args():
     sys.argv = ["testdrive", "groundingdino", "photo.jpg", "cat"]
     try:
         with (
+            mock.patch.object(pyenv.sys, "platform", "linux"),
             mock.patch.object(pyenv, "is_in_env", return_value=False),
             mock.patch.object(pyenv.Path, "exists", return_value=True),
             mock.patch.object(pyenv.os, "execve", side_effect=fake_execve),

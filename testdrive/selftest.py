@@ -57,7 +57,7 @@ class SelfTestResult:
         if self.failures:
             lines.append("")
             for f in self.failures:
-                lines.append(f"  ✗  {f}")
+                lines.append(f"  X  {f}")
         lines.append("")
         lines.append("PASS" if self.passed else "FAIL")
         return "\n".join(lines)
@@ -282,7 +282,7 @@ def run_selftest(plugin_id: str, model_override: str | None = None) -> SelfTestR
     try:
         image = _make_synthetic_image()
         w, h = image.size
-        result.add_step("synthetic image", ok=True, note=f"{w}×{h} RGB")
+        result.add_step("synthetic image", ok=True, note=f"{w}x{h} RGB")
     except Exception as exc:  # noqa: BLE001
         result.add_step("synthetic image", ok=False, note=str(exc))
         result.failures.append(f"could not create test image: {exc}")
@@ -353,7 +353,7 @@ def run_selftest(plugin_id: str, model_override: str | None = None) -> SelfTestR
     count = _validate_detections(detections, validation_failures)
 
     ok = len(validation_failures) == 0
-    note = f"{detect_ms:.0f} ms  →  {count} detection(s)"
+    note = f"{detect_ms:.0f} ms  ->  {count} detection(s)"
     result.add_step("detect", ok=ok, note=note)
     result.add_step(f'prompt: "{prompt}"', ok=True)
 

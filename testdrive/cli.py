@@ -218,7 +218,7 @@ def _print_manifest_text(m: PluginManifest) -> None:
     if m.supports:
         print("Supports")
         for item in m.supports:
-            print(f"    \u2713 {item}")
+            print(f"    * {item}")
         print()
     if m.requirements:
         print("Requirements")
@@ -1071,7 +1071,31 @@ def _normalize_argv(argv: list[str]) -> list[str]:
     return out
 
 
+def _harden_console_encoding() -> None:
+    """Make stdout/stderr tolerant of characters the current console
+    codepage can't represent.
+
+    On Windows, redirecting output to a file (``testdrive ... 1>out.txt``)
+    or running under a non-UTF-8 codepage (``cp1252``, etc.) makes Python
+    fall back to that codepage for stdout/stderr. Any accidental
+    non-ASCII character in a print()'d string (ours or a plugin's) then
+    raises ``UnicodeEncodeError`` and kills the whole run. Reconfiguring
+    with ``errors="replace"`` turns that into a harmless '?' instead of a
+    crash. We prefer to just not emit non-ASCII in our own output, but
+    this is a backstop for everything else (plugin descriptions, error
+    messages from dependencies, etc.).
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(errors="replace")
+            except (ValueError, OSError):
+                pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _harden_console_encoding()
     argv = list(sys.argv[1:] if argv is None else argv)
     argv = _normalize_argv(argv)
 

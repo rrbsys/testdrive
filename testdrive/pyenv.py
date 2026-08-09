@@ -282,8 +282,12 @@ def ensure_framework_env(cd: Path) -> None:
     """Guard entry point: make sure we're running from ``cache/pyenv/framework``.
 
     - Already there → returns immediately, no-op.
-    - Not there, but the environment exists → relaunches via ``os.execve``
-      (replaces the current process; does not return on success).
+    - Not there, but the environment exists → relaunches into it and does
+      not return: on POSIX via ``os.execve`` (a true in-place exec — same
+      PID, so anything waiting on us waits on the *real* run); on Windows
+      via a synchronous child process, after which we ``sys.exit()`` with
+      its exact return code (see the platform note below for why this
+      split exists).
     - Not there, and the environment doesn't exist → prints setup
       instructions to stderr and exits with ``ExitCode.PYENV_NOT_CONFIGURED``.
 
@@ -291,13 +295,33 @@ def ensure_framework_env(cd: Path) -> None:
     non-empty value) — for CI and advanced/development use.
 
     Relaunching is tried **at most once** per process tree (tracked via
-    an injected marker env var, not a loop counter — ``execve`` replaces
-    the process, so there's no in-memory state to loop on). Without this,
-    a target that exists as a file but isn't actually a valid venv (e.g.
-    missing ``pyvenv.cfg``, so Python never adopts it as ``sys.prefix``)
-    would relaunch into itself, still not satisfy ``is_in_env()``, and
-    relaunch again — forever. One bounded retry turns that into a clean,
-    immediate, diagnosable error instead of a silent infinite loop.
+    an injected marker env var, not a loop counter — the relaunch, on
+    either platform, does not return to this frame on success, so there's
+    no in-memory state to loop on). Without this, a target that exists as
+    a file but isn't actually a valid venv (e.g. missing ``pyvenv.cfg``,
+    so Python never adopts it as ``sys.prefix``) would relaunch into
+    itself, still not satisfy ``is_in_env()``, and relaunch again —
+    forever. One bounded retry turns that into a clean, immediate,
+    diagnosable error instead of a silent infinite loop.
+
+    Platform note — why Windows can't just use ``os.execve`` too:
+    On POSIX, ``execve`` really does replace the current process image in
+    place; the PID never changes and nothing above us (a shell, a wrapper
+    script, a CI runner) ever regains control until the *relaunched* run
+    finishes. Windows has no such syscall. CPython emulates ``os.execve``
+    there via the C runtime's "overlay" spawn mode, which is fire-and-forget
+    from the parent's point of view: it starts the new interpreter as a
+    *separate* process and then immediately terminates the current one,
+    without waiting for the new one to do anything. Any process tree above
+    us that's watching *this* PID (cmd.exe, a console-script launcher .exe,
+    a CI step) sees testdrive "finish" the instant the relaunch is kicked
+    off — while the real run keeps going in the background, racing
+    whatever the caller does next (read output files, report a step as
+    complete, tear down a temp dir the worker still needs) and interleaving
+    its console output with anything typed afterward. That's silent data-
+    race territory, not just a cosmetic glitch, so on Windows we spawn the
+    relaunch as a real child process and block on it with ``subprocess.run``
+    instead, then propagate its exit code ourselves.
     """
     if os.environ.get(_SKIP_ENV_VAR):
         log.debug("%s set — skipping framework-env check", _SKIP_ENV_VAR)
@@ -321,14 +345,31 @@ def ensure_framework_env(cd: Path) -> None:
     target = env_python_path(cd)
     if target.exists():
         print(f"[testdrive] relaunching via {target} ...", file=sys.stderr)
-        try:
-            relaunch_env = os.environ.copy()
-            relaunch_env[_RELAUNCH_MARKER] = "1"
-            os.execve(str(target), [str(target), "-m", "testdrive"] + sys.argv[1:], relaunch_env)
-            return  # pragma: no cover — os.execve never returns on success
-        except OSError as exc:
-            print(f"[testdrive] could not relaunch via {target}: {exc}\n", file=sys.stderr)
-            # fall through to the setup instructions below
+        relaunch_env = os.environ.copy()
+        relaunch_env[_RELAUNCH_MARKER] = "1"
+        argv = [str(target), "-m", "testdrive"] + sys.argv[1:]
+
+        if sys.platform == "win32":
+            # See the platform note in this function's docstring: on
+            # Windows, os.execve does not block whatever launched *us*, so
+            # we spawn synchronously ourselves and wait for the real exit
+            # code instead of trusting a fire-and-forget "exec".
+            import subprocess
+
+            try:
+                completed = subprocess.run(argv, env=relaunch_env)
+            except OSError as exc:
+                print(f"[testdrive] could not relaunch via {target}: {exc}\n", file=sys.stderr)
+                # fall through to the setup instructions below
+            else:
+                sys.exit(completed.returncode)
+        else:
+            try:
+                os.execve(str(target), argv, relaunch_env)
+                return  # pragma: no cover — os.execve never returns on success
+            except OSError as exc:
+                print(f"[testdrive] could not relaunch via {target}: {exc}\n", file=sys.stderr)
+                # fall through to the setup instructions below
 
     print(_relaunch_instructions(cd), file=sys.stderr)
     sys.exit(ExitCode.PYENV_NOT_CONFIGURED)

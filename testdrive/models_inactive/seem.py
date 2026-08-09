@@ -260,7 +260,20 @@ class Plugin(DetectorPlugin):
             # in a CPU-only run can legitimately depend on getting a
             # real CUDA index back from this call anyway, since that
             # would already require CUDA to be available.
-            torch.cuda.current_device = lambda: torch.device("cpu")
+            #
+            # Assigned via setattr rather than `torch.cuda.current_device
+            # = ...` on purpose: whether mypy sees a fully-typed
+            # current_device() (-> int) here or treats torch as Any
+            # depends on which torch build/version is installed, which
+            # in this project can differ by platform (see
+            # cache/pyenv/<platform>/framework's per-OS provisioning).
+            # A direct attribute assignment either needs a
+            # `# type: ignore` or doesn't, unpredictably, across those
+            # environments — and `warn_unused_ignores = true` turns an
+            # unneeded one into its own error. setattr's signature is
+            # intentionally untyped for the value, so this is clean
+            # either way, on any platform.
+            setattr(torch.cuda, "current_device", lambda: torch.device("cpu"))
 
             # Same story, different call shape: other points in the
             # vendored code — e.g. modeling/language/vlpencoder.py's
@@ -280,8 +293,15 @@ class Plugin(DetectorPlugin):
             # becoming a no-op matches reality everywhere at once,
             # rather than requiring every call site to be found one
             # crash at a time.
-            torch.Tensor.cuda = lambda self, *args, **kwargs: self
-            torch.nn.Module.cuda = lambda self, *args, **kwargs: self
+            #
+            # setattr, not a direct method assignment — same reasoning
+            # as current_device() above: whether mypy treats these as
+            # typed methods ("Cannot assign to a method") or as Any
+            # depends on the installed torch build, which varies by
+            # platform here. setattr sidesteps that instead of needing a
+            # `# type: ignore` that's only correct on some platforms.
+            setattr(torch.Tensor, "cuda", lambda self, *args, **kwargs: self)
+            setattr(torch.nn.Module, "cuda", lambda self, *args, **kwargs: self)
 
         self._model = (
             BaseModel(opt, build_model(opt))
