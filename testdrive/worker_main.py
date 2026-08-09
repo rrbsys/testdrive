@@ -19,12 +19,14 @@ stdout file descriptor is reserved for these lines only — see
         {"cmd": "init", "model": str | null}
         {"cmd": "detect", "image_path": str, "prompt": str,
          "threshold": float, "model": str | null}
+        {"cmd": "task", "image_path": str, "task_prompt": str,
+         "model": str | null}
         {"cmd": "shutdown"}
 
     worker -> parent
         # response to "init" (also implicitly run before the first
-        # "detect", if not already done — so a plain detect-only caller
-        # never needs to send "init" separately)
+        # "detect"/"task", if not already done — so a plain detect-only
+        # caller never needs to send "init" separately)
         {"ok": true}
         {"ok": false, "kind": "missing_dependency", "missing": [str, ...]}
         {"ok": false, "kind": "cache_not_populated", "message": str}
@@ -33,6 +35,12 @@ stdout file descriptor is reserved for these lines only — see
         # response to "detect" (one line per request)
         {"ok": true, "detections": [{"label": str, "score": float,
                                       "bbox": [int, int, int, int]}, ...]}
+        {"ok": false, "kind": "missing_dependency", "missing": [str, ...]}
+        {"ok": false, "kind": "cache_not_populated", "message": str}
+        {"ok": false, "kind": "error", "message": str}
+
+        # response to "task" (text-output tasks; see PluginManifest.tasks)
+        {"ok": true, "text_result": str}
         {"ok": false, "kind": "missing_dependency", "missing": [str, ...]}
         {"ok": false, "kind": "cache_not_populated", "message": str}
         {"ok": false, "kind": "error", "message": str}
@@ -217,6 +225,20 @@ def main(argv: list[str]) -> int:
         if cmd == "init":
             error = ensure_initialized(request.get("model"))
             _respond(error if error is not None else {"ok": True})
+            continue
+
+        if cmd == "task":
+            error = ensure_initialized(request.get("model"))
+            if error is not None:
+                _respond(error)
+                continue
+            try:
+                image = load_image(Path(request["image_path"]))
+                text_result = plugin.run_task(image, request["task_prompt"])
+                _respond({"ok": True, "text_result": text_result})
+            except Exception as exc:  # noqa: BLE001
+                traceback.print_exc(file=sys.stderr)
+                _respond({"ok": False, "kind": "error", "message": f"run_task() raised: {exc}"})
             continue
 
         if cmd != "detect":

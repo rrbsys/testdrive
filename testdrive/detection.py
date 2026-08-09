@@ -204,6 +204,13 @@ class PluginManifest:
     #: with no such alternate text-output tasks.
     tasks: dict[str, str] = field(default_factory=dict)
 
+    #: For language-aware plugins (e.g. PaddleOCR): the default language
+    #: code used when the prompt does not specify one, and the full list
+    #: of languages the plugin can be asked to restrict to. Empty for
+    #: plugins that are not language-aware.
+    language: str = ""
+    languages: list[str] = field(default_factory=list)
+
     #: Which named virtual environment this plugin runs in. Every
     #: plugin shares the "framework" environment (cache/pyenv/framework)
     #: by default — deliberately, since installing more and more

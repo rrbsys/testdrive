@@ -91,6 +91,7 @@ module = [
     "einops.*",
     "timm.*",
     "ultralytics.*",
+    "paddleocr.*",
     "torchvision.*",
     "cv2",
 ]

@@ -249,6 +249,11 @@ def _print_manifest_text(m: PluginManifest) -> None:
         for name, token in m.tasks.items():
             print(f"    {name.ljust(width)}  ->  {token}")
         print()
+    if m.languages:
+        print(f"Languages      : {', '.join(m.languages)}")
+        if m.language:
+            print(f"Default lang   : {m.language}")
+        print()
     if m.sample_prompt:
         print(f'Sample prompt  : "{m.sample_prompt}"')
 
@@ -519,53 +524,83 @@ def _run_detect_one(
 
     # 3.5. task mode (see PluginManifest.tasks): prompt exactly matches
     # one of a multi-task plugin's declared short names (e.g.
-    # Florence-2's "caption"/"ocr"/...) — run its text-output task
-    # instead of normal bounding-box detect(), and skip annotating/
-    # saving output images entirely (there are no boxes to draw).
-    # Worker-routed (non-"framework"-pyenv) plugins aren't supported
-    # here yet — worker_main.py's wire protocol has no "task" command,
-    # only "init"/"detect"/"shutdown" — since no current plugin needs
-    # both a dedicated pyenv and text tasks. Extend worker_main.py's
-    # protocol first if that changes.
+    # Florence-2's "caption"/"ocr"/..., or paddleocr's "ocr") — run its
+    # text-output task instead of normal bounding-box detect(), and skip
+    # annotating/saving output images entirely (there are no boxes to
+    # draw). Works for both in-process ("framework") plugins and
+    # worker-routed ones (via the "task" wire-protocol command).
     if plugin.manifest.tasks and prompt in plugin.manifest.tasks:
-        if uses_worker:
-            return (
-                ExitCode.CLI_ERROR,
-                None,
-                (
-                    f"plugin '{plugin_id}' declares task '{prompt}', but text tasks aren't "
-                    f'supported yet for a plugin with its own pyenv (only "framework"-pyenv '
-                    f"plugins can run one right now)"
-                ),
-            )
-        try:
-            log.info("initializing plugin '%s' ...", plugin_id)
-            plugin.initialize()
-        except CacheNotPopulatedError as exc:
-            return (
-                ExitCode.MISSING_DEPENDENCY,
-                None,
-                (
-                    f"plugin '{plugin_id}' needs its model downloaded first ({exc}). "
-                    f"Run `testdrive -T {plugin_id}` (or -TT {plugin_id}) once to populate the "
-                    f"cache, then re-run this command."
-                ),
-            )
-        except Exception as exc:  # noqa: BLE001
-            return (
-                ExitCode.INFERENCE_FAILED,
-                None,
-                f"plugin '{plugin_id}' initialize() failed: {exc}",
-            )
-
         task_prompt = plugin.manifest.tasks[prompt]
-        try:
-            log.info("running task: prompt=%r  (task token: %s)", prompt, task_prompt)
-            t0 = time.perf_counter()
-            text_result = plugin.run_task(image, task_prompt)
-            elapsed_ms = (time.perf_counter() - t0) * 1000
-        except Exception as exc:  # noqa: BLE001
-            return ExitCode.INFERENCE_FAILED, None, f"plugin '{plugin_id}' run_task() raised: {exc}"
+        if uses_worker:
+            from .cache import cache_dir
+            from .worker_pool import WorkerError, get_pool
+
+            try:
+                worker = get_pool().get(plugin_id, plugin.manifest, cache_dir())
+                log.info(
+                    "running task via '%s' worker: prompt=%r  (task token: %s)",
+                    plugin.manifest.pyenv,
+                    prompt,
+                    task_prompt,
+                )
+                t0 = time.perf_counter()
+                text_result = worker.task(
+                    image_path, task_prompt, plugin.manifest.model or None
+                )
+                elapsed_ms = (time.perf_counter() - t0) * 1000
+            except WorkerError as exc:
+                if exc.kind == "missing_dependency":
+                    from .pyenv import install_hint
+
+                    msg = (
+                        f"plugin '{plugin_id}' is missing dependencies in its "
+                        f"'{plugin.manifest.pyenv}' environment:\n    "
+                        + "\n    ".join(exc.missing)
+                        + "\n\nInstall with:  "
+                        + install_hint(cache_dir(), plugin.manifest.pyenv, exc.missing)
+                    )
+                    return ExitCode.MISSING_DEPENDENCY, None, msg
+                if exc.kind == "cache_not_populated":
+                    return ExitCode.MISSING_DEPENDENCY, None, (
+                        f"plugin '{plugin_id}' needs its model downloaded first ({exc}). "
+                        f"Run `testdrive -T {plugin_id}` (or -TT {plugin_id}) once to populate the "
+                        f"cache, then re-run this command."
+                    )
+                if exc.kind == "env_not_configured":
+                    return ExitCode.PYENV_NOT_CONFIGURED, None, str(exc)
+                return ExitCode.INFERENCE_FAILED, None, f"plugin '{plugin_id}' (worker): {exc}"
+        else:
+            try:
+                log.info("initializing plugin '%s' ...", plugin_id)
+                plugin.initialize()
+            except CacheNotPopulatedError as exc:
+                return (
+                    ExitCode.MISSING_DEPENDENCY,
+                    None,
+                    (
+                        f"plugin '{plugin_id}' needs its model downloaded first ({exc}). "
+                        f"Run `testdrive -T {plugin_id}` (or -TT {plugin_id}) once to populate the "
+                        f"cache, then re-run this command."
+                    ),
+                )
+            except Exception as exc:  # noqa: BLE001
+                return (
+                    ExitCode.INFERENCE_FAILED,
+                    None,
+                    f"plugin '{plugin_id}' initialize() failed: {exc}",
+                )
+
+            try:
+                log.info("running task: prompt=%r  (task token: %s)", prompt, task_prompt)
+                t0 = time.perf_counter()
+                text_result = plugin.run_task(image, task_prompt)
+                elapsed_ms = (time.perf_counter() - t0) * 1000
+            except Exception as exc:  # noqa: BLE001
+                return (
+                    ExitCode.INFERENCE_FAILED,
+                    None,
+                    f"plugin '{plugin_id}' run_task() raised: {exc}",
+                )
 
         result = DetectionResult(
             image_path=image_path.resolve(),

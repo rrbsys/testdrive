@@ -22,6 +22,7 @@ needs to change.
 | `samgd` | Grounding DINO + SAM | GDINO box, refined to a tight mask-derived box by SAM |
 | `yolo11` | YOLO11 | fixed 80-class COCO vocabulary (not open-vocabulary like the rest — see below), fast, own `pyenv` |
 | `yunet` | YuNet | fixed single-class (face-only) detection — prompt must be `"face"` — see below; fast CPU-only OpenCV DNN, no torch |
+| `paddleocr` | PaddleOCR | fixed single-class (text-block-only) detection — prompt must be `"textblock"` — labels each box with detected language (currently en/zh; German pending an upstream paddle bug fix — see plugin docstring) + OCR confidence instead of a class name; own `pyenv` |
 
 Three plugins are parked in `testdrive/models_inactive/` (a sibling of
 `testdrive/models/`, not a subpackage of it — so its files use the
