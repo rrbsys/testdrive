@@ -228,6 +228,78 @@ def apply_source_patches(
         target.write_text(text.replace(find, replace))
 
 
+def check_modules_installed(
+    python_path: Path, requirements: list[dict[str, str]]
+) -> tuple[bool, list[str]]:
+    """The out-of-process equivalent of ``DetectorPlugin.is_installed()``.
+
+    Checks, via a quick subprocess using *python_path*'s own
+    interpreter, which of *requirements* (``PluginManifest.requirements``
+    -shaped: each a dict with ``"pip"``/``"module"`` keys) can actually
+    be imported there.
+
+    Needed for any plugin whose dependencies live in a dedicated pyenv
+    (see ``PluginManifest.pyenv``) other than the one this process
+    happens to be running in — an in-process ``importlib.import_module``
+    check there would just be probing the wrong interpreter's
+    site-packages entirely, and would report a fully-provisioned plugin
+    as "missing" (see cli.py's ``-I`` for the caller; this was the same
+    class of bug ``-T``/``-TT`` already had to fix for exactly this
+    reason — see ``selftest.run_selftest``'s ``uses_worker`` branch).
+
+    Deliberately narrower than the real worker protocol
+    (``worker_pool.py``/``worker_main.py``): only imports modules, never
+    starts a long-lived worker, never triggers auto-provisioning or a
+    download. Safe to call freely for a status check even with
+    downloads disabled.
+
+    Returns ``(False, [f"error probing environment: ..."])`` — not an
+    exception — if the probe itself can't run (interpreter missing,
+    times out, crashes): from a status-reporting caller's point of
+    view that's just another reason to call this plugin "not usable
+    right now", same shape as an actually-missing package.
+    """
+    import json as _json
+    import subprocess
+
+    if not requirements:
+        return True, []
+
+    modules = [req["module"] for req in requirements]
+    probe = (
+        "import importlib, json\n"
+        f"modules = {modules!r}\n"
+        "missing = []\n"
+        "for m in modules:\n"
+        "    try:\n"
+        "        importlib.import_module(m)\n"
+        "    except ImportError:\n"
+        "        missing.append(m)\n"
+        "print(json.dumps(missing))\n"
+    )
+    try:
+        completed = subprocess.run(
+            [str(python_path), "-c", probe],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, [f"error probing environment: {exc}"]
+
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or f"exit code {completed.returncode}"
+        return False, [f"error probing environment: {detail}"]
+
+    try:
+        missing_modules = set(_json.loads(completed.stdout))
+    except (_json.JSONDecodeError, ValueError):
+        return False, [f"error probing environment: unexpected output {completed.stdout!r}"]
+
+    missing_pip = [req["pip"] for req in requirements if req["module"] in missing_modules]
+    return (len(missing_pip) == 0, missing_pip)
+
+
 def is_in_env(cd: Path, name: str = FRAMEWORK_ENV_NAME) -> bool:
     """True if the *currently running* interpreter is that environment.
 
