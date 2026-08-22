@@ -51,13 +51,52 @@ JSON response line the parent is waiting for; see
 
 from __future__ import annotations
 
-import json
-import logging
-import os
 import sys
-import traceback
-from pathlib import Path
-from typing import Any
+
+
+def _needs_safe_reexec() -> bool:
+    """See testdrive/__main__.py's copy of this function for the full
+    explanation. Duplicated here (not imported) deliberately: importing
+    it from elsewhere in the package would itself go through the exact
+    package-resolution machinery this function exists to check, before
+    we'd get a chance to run it.
+
+    Worker subprocesses are spawned by worker_pool.py via
+    `<python> -m testdrive.worker_main <plugin_ref>` with no `cwd=`
+    override and no `-P`, so they're just as exposed to cwd/sys.path
+    shadowing as `-m testdrive` itself - the visible symptom here is
+    different (not an ImportError, since this file has no top-level
+    relative import to crash on) but just as broken: pluginloader.py's
+    plugin discovery walks `testdrive.__path__` (see its
+    `pkgutil.iter_modules(models_pkg.__path__)` calls), and a
+    namespace-shadowed "testdrive" package has that pointing at an
+    empty shadow directory instead of the real source tree - so every
+    plugin silently fails to be found at all ("no plugin found with id
+    '<x>'"), with nothing that looks like an import error to hint why.
+    """
+    if getattr(sys.flags, "safe_path", False):
+        return False
+    if sys.version_info < (3, 11):
+        return False
+    pkg = sys.modules.get("testdrive")
+    return pkg is None or not hasattr(pkg, "__version__")
+
+
+if _needs_safe_reexec():
+    import os
+
+    os.execv(
+        sys.executable,
+        [sys.executable, "-P", "-m", "testdrive.worker_main", *sys.argv[1:]],
+    )
+
+import json  # noqa: E402 - these must come after the re-exec guard above
+import logging  # noqa: E402
+import os  # noqa: E402
+import sys  # noqa: E402
+import traceback  # noqa: E402
+from pathlib import Path  # noqa: E402
+from typing import Any  # noqa: E402
 
 log = logging.getLogger("testdrive.worker_main")
 

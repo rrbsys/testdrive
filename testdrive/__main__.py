@@ -1,5 +1,4 @@
 import sys
-from .cli import entrypoint
 
 
 def _needs_safe_reexec() -> bool:
@@ -40,6 +39,7 @@ if _needs_safe_reexec():
 
     os.execv(sys.executable, [sys.executable, "-P", "-m", "testdrive", *sys.argv[1:]])
 
+from .cli import entrypoint  # noqa: E402 - must come after the re-exec guard above
 
 if __name__ == "__main__":
     raise SystemExit(entrypoint())

@@ -6,8 +6,12 @@ Loop mode:
 
     <image> may also be a directory: every file in it is processed
     (except files matching our own output pattern, *-matches.* /
-    *-redacted.*), so re-running over an already-processed directory
-    doesn't try to detect objects in your own annotated output.
+    *-redacted.* / *_redactions.json), so re-running over an
+    already-processed directory doesn't try to detect objects in your
+    own annotated output. Directory runs also write a
+    <plugin>_redactions.json (in the image directory or under
+    --output-dir) listing every match as imagename / rectangle / label /
+    confidence.
 
     '*' plugin and a directory <image> compose: every plugin runs
     against every image in the directory. In any loop (multi-plugin
@@ -134,8 +138,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         metavar="DIR",
-        help="write all -matches/-redacted output images here instead of next to "
-        "each input image (created if it doesn't exist)",
+        help="write all -matches/-redacted output images (and, for directory "
+        "runs, <plugin>_redactions.json) here instead of next to each input "
+        "image (created if it doesn't exist)",
     )
     parser.add_argument(
         "--model",
@@ -796,7 +801,7 @@ def _run_detect_one(
     return ExitCode.SUCCESS, result, None
 
 
-_OWN_OUTPUT_PATTERNS = ("*-matches*.*", "*-redacted.*")
+_OWN_OUTPUT_PATTERNS = ("*-matches*.*", "*-redacted.*", "*_redactions.json")
 
 
 def _is_own_output_file(path: Path) -> bool:
@@ -804,7 +809,8 @@ def _is_own_output_file(path: Path) -> bool:
     or ``*-matches.*``/``*-matches<N>.*`` (the match count embedded in
     the filename, e.g. ``photo-matches3.png`` — see
     imageio.derive_output_paths) — including plugin-suffixed variants
-    like ``photo-owlv2-matches3.png``, which the glob's ``*`` covers too.
+    like ``photo-owlv2-matches3.png``, which the glob's ``*`` covers too
+    — or a ``*_redactions.json`` summary written for directory runs.
     """
     import fnmatch
 
@@ -816,9 +822,10 @@ def _expand_image_arg(image_arg: str) -> tuple[list[Path], str | None]:
 
     A file resolves to itself. A directory resolves to every file
     directly inside it (non-recursive), except ones matching our own
-    output pattern (``*-matches.*`` / ``*-redacted.*``) — so re-running
-    detection over a directory you've already run detection in doesn't
-    try to detect objects in your own annotated/redacted output images.
+    output pattern (``*-matches.*`` / ``*-redacted.*`` /
+    ``*_redactions.json``) — so re-running detection over a directory
+    you've already run detection in doesn't try to detect objects in
+    your own annotated/redacted output images.
 
     Files with an unrecognized extension are still included rather than
     filtered out here: ``load_image()`` already produces a clean
@@ -835,7 +842,8 @@ def _expand_image_arg(image_arg: str) -> tuple[list[Path], str | None]:
         if not candidates:
             return [], (
                 f"directory '{p}' has no input images "
-                "(after excluding *-matches.*/*-redacted.* output files)"
+                "(after excluding *-matches.*/*-redacted.*/*_redactions.json "
+                "output files)"
             )
         return candidates, None
 
@@ -897,6 +905,13 @@ def cmd_detect_dispatch(
     n_passed = 0
     n_total = 0
     json_out = []
+    # When the input is a directory, collect every detection into a
+    # per-plugin <plugin>_redactions.json written next to the images
+    # (or under --output-dir). Single-image runs never write this file.
+    is_imagedir = Path(image_arg).is_dir()
+    # Keyed by resolved manifest id (not the CLI arg, which may be a
+    # ../models_inactive/... path reference for parked plugins).
+    redactions_by_plugin: dict[str, list[dict[str, Any]]] = {}
 
     for image_path in image_paths:
         for plugin_id in plugin_ids:
@@ -930,6 +945,19 @@ def cmd_detect_dispatch(
                     json_out.append({"exit_code": exit_code, **result.to_dict()})
                 else:
                     print(result.summary())
+                if is_imagedir:
+                    rid = result.plugin_id
+                    if rid not in redactions_by_plugin:
+                        redactions_by_plugin[rid] = []
+                    for det in result.detections:
+                        redactions_by_plugin[rid].append(
+                            {
+                                "imagename": image_path.name,
+                                "rectangle": list(det.bbox),
+                                "label": det.label,
+                                "confidence": det.score,
+                            }
+                        )
             elif as_json:
                 json_out.append(
                     {
@@ -939,6 +967,22 @@ def cmd_detect_dispatch(
                         "error": error,
                     }
                 )
+
+    if is_imagedir:
+        redactions_dir = output_dir if output_dir is not None else Path(image_arg)
+        try:
+            redactions_dir.mkdir(parents=True, exist_ok=True)
+            # Always write a file per successfully-resolved plugin that
+            # produced at least one DetectionResult (even if zero matches).
+            for rid, entries in redactions_by_plugin.items():
+                out_path = redactions_dir / f"{rid}_redactions.json"
+                out_path.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8")
+                log.info("wrote %s (%d match(es))", out_path, len(entries))
+                if not as_json:
+                    print(f"Redactions: {out_path}  ({len(entries)} match(es))")
+        except OSError as exc:
+            log.error("could not write redactions JSON: %s", exc)
+            any_failed = True
 
     if as_json:
         print(json.dumps(json_out, indent=2))

@@ -260,6 +260,7 @@ under `--output-dir` if given):
 |---|---|
 | `photo-matches.png` | Original with green bounding boxes + labels |
 | `photo-redacted.png` | Original with black-bar redactions |
+| `<plugin>_redactions.json` | (directory runs only) every match as `imagename` / `rectangle` / `label` / `confidence` |
 
 ### Cache discipline
 
