@@ -40,7 +40,7 @@ Usage:
     python autoconfig.py [options]
 
 Options (defaults shown):
-    --testdrive-remoteurl  https://github.com/rrbsys/testdrive/archive/refs/tags/v0.1.3.zip
+    --testdrive-remoteurl  https://github.com/rrbsys/testdrive/archive/refs/tags/v0.1.4.zip
     --testdrive-home       <home>/testdrive
     --plugins              "yunet,yolo11"
     --python-path          "python"
@@ -69,7 +69,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Bootstrap or inspect a testdrive installation.")
     parser.add_argument(
         "--testdrive-remoteurl",
-        default="https://github.com/rrbsys/testdrive/archive/refs/tags/v0.1.3.zip",
+        default="https://github.com/rrbsys/testdrive/archive/refs/tags/v0.1.4.zip",
         help="URL of the testdrive source archive to download on first run.",
     )
     parser.add_argument(
