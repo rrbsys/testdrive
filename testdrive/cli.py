@@ -655,9 +655,7 @@ def _run_detect_one(
                     task_prompt,
                 )
                 t0 = time.perf_counter()
-                text_result = worker.task(
-                    image_path, task_prompt, plugin.manifest.model or None
-                )
+                text_result = worker.task(image_path, task_prompt, plugin.manifest.model or None)
                 elapsed_ms = (time.perf_counter() - t0) * 1000
             except WorkerError as exc:
                 if exc.kind == "missing_dependency":
@@ -672,10 +670,14 @@ def _run_detect_one(
                     )
                     return ExitCode.MISSING_DEPENDENCY, None, msg
                 if exc.kind == "cache_not_populated":
-                    return ExitCode.MISSING_DEPENDENCY, None, (
-                        f"plugin '{plugin_id}' needs its model downloaded first ({exc}). "
-                        f"Run `testdrive -T {plugin_id}` (or -TT {plugin_id}) once to populate the "
-                        f"cache, then re-run this command."
+                    return (
+                        ExitCode.MISSING_DEPENDENCY,
+                        None,
+                        (
+                            f"plugin '{plugin_id}' needs its model downloaded first ({exc}). "
+                            f"Run `testdrive -T {plugin_id}` (or -TT {plugin_id}) once to populate the "
+                            f"cache, then re-run this command."
+                        ),
                     )
                 if exc.kind == "env_not_configured":
                     return ExitCode.PYENV_NOT_CONFIGURED, None, str(exc)

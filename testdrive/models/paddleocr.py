@@ -269,7 +269,6 @@ class Plugin(DetectorPlugin):
                 out.append(Detection(label=label, score=score, bbox=(x1, y1, x2, y2)))
         return out
 
-
     def _collect_texts(self, img_bgr: Any) -> list[str]:
         """Return every recognized text line from the image (no threshold)."""
         texts_out: list[str] = []
