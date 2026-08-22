@@ -117,7 +117,13 @@ def load_plugin(plugin_id: str) -> LoadedPlugin:
             continue
         try:
             loaded = _load_module(module_name)
-        except PluginLoadError:
+        except PluginLoadError as exc:
+            # Previously silent (unlike iter_loadable_plugins(), which
+            # already logs this) - a module failing to import here used
+            # to surface only as a generic "no plugin found with id
+            # '<id>'" once every module had been tried and none matched,
+            # with no trace of *why* any of them failed.
+            log.warning("skipping plugin '%s': %s", module_name, exc)
             continue
         if loaded.manifest.id == plugin_id:
             return loaded

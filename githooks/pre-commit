@@ -19,8 +19,8 @@ set -e
 echo "[pre-commit] ruff check ."
 ruff check .
 
-echo "[pre-commit] ruff format --check ."
-ruff format --check .
+echo "[pre-commit] ruff format --check --exclude work ."
+ruff format --check --exclude work .
 
 echo "[pre-commit] mypy testdrive/"
 mypy testdrive/

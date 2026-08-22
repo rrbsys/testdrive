@@ -27,9 +27,6 @@ classifiers = [
 dependencies = [
     "Pillow>=10.0",  # currently the only requirement for cli/framework
     "certifi>=2024.0",  # CA bundle for download_file() on hosts with incomplete system trust stores (e.g. Win 8.1)
-    # put the following very general restrictions somewhere if you know a better place...
-    "Numpy~=1.0; python_version=='3.11'",  # lots of 3.11 modules can't live with numpy 2.x
-    # "Torch<2.5; sys_platform=='win32'",    # uncomment for wine11 on mac only
 ]
 
 [project.optional-dependencies]
@@ -53,12 +50,28 @@ dev = [
     "mypy>=1.8",
     "numpy",  # for CI
 ]
+# very general restrictions that only apply on mac dev machines (wine11
+# under macOS specifically) — kept out of the core `dependencies` list
+# so they don't leak into plain (e.g. Windows) installs.
+dev_mac = [
+    "Numpy~=1.0; python_version=='3.11'",  # lots of 3.11 modules can't live with numpy 2.x
+    "Torch<2.5; sys_platform=='win32'",    # for wine11 on mac only
+]
 
 [project.scripts]
 testdrive = "testdrive.cli:entrypoint"
 
 [tool.setuptools.packages.find]
 include = ["testdrive*"]
+
+# examples/ (used by `-TT`/`-T` self-test — see cli.py's _examples_dir())
+# lives inside the testdrive/ package but has no __init__.py, so
+# packages.find alone won't ship its contents in a wheel: without this,
+# only an editable install (where __file__ resolves back to the real
+# checkout) can find it, and a normal `pip install testdrive` from PyPI
+# would fail every `-TT` run with "no usable example".
+[tool.setuptools.package-data]
+testdrive = ["examples/**/*.png", "examples/**/*.jpg", "examples/**/*.md"]
 
 [tool.ruff]
 line-length = 100

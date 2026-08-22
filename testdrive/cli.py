@@ -6,8 +6,12 @@ Loop mode:
 
     <image> may also be a directory: every file in it is processed
     (except files matching our own output pattern, *-matches.* /
-    *-redacted.*), so re-running over an already-processed directory
-    doesn't try to detect objects in your own annotated output.
+    *-redacted.* / *_redactions.json), so re-running over an
+    already-processed directory doesn't try to detect objects in your
+    own annotated output. Directory runs also write a
+    <plugin>_redactions.json (in the image directory or under
+    --output-dir) listing every match as imagename / rectangle / label /
+    confidence.
 
     '*' plugin and a directory <image> compose: every plugin runs
     against every image in the directory. In any loop (multi-plugin
@@ -93,7 +97,13 @@ def build_parser() -> argparse.ArgumentParser:
         "-M", "--manifest", metavar="PLUGIN", help="show full manifest for PLUGIN ('*' = all)"
     )
     mode.add_argument(
-        "-I", "--installed", action="store_true", help="installation status for all plugins"
+        "-I",
+        "--installed",
+        nargs="?",
+        const="*",  # bare '-I' == '-I "*"' == all plugins; matches LOOP_ALL below
+        default=None,
+        metavar="PLUGIN",
+        help="installation status: all plugins by default, or just PLUGIN ('*' = all, same as bare -I)",
     )
     mode.add_argument(
         "-T", "--selftest", metavar="PLUGIN", help="run self-test for PLUGIN ('*' = all)"
@@ -128,8 +138,9 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         metavar="DIR",
-        help="write all -matches/-redacted output images here instead of next to "
-        "each input image (created if it doesn't exist)",
+        help="write all -matches/-redacted output images (and, for directory "
+        "runs, <plugin>_redactions.json) here instead of next to each input "
+        "image (created if it doesn't exist)",
     )
     parser.add_argument(
         "--model",
@@ -317,23 +328,114 @@ def cmd_manifest_loop(as_json: bool) -> int:
 # ---------------------------------------------------------------------------
 
 
-def cmd_installed(as_json: bool) -> int:
-    plugins = iter_loadable_plugins()
-    results: list[dict[str, Any]] = []
-    for loaded in sorted(plugins, key=lambda p: p.manifest.id):
+def _plugin_install_status(loaded: Any, cd: Path) -> dict[str, Any]:
+    """Compute installed/missing status for one plugin — correctly
+    targeting whichever pyenv it actually depends on (see
+    ``PluginManifest.pyenv``), not just checking imports in *this*
+    process regardless of whether this process even is that plugin's
+    environment.
+
+    Mirrors the same ``uses_worker`` distinction ``-T``/``-TT`` and a
+    plain detect run already make (see ``selftest.run_selftest`` and
+    ``cli._run_detect_one``): a "framework"-pyenv plugin runs *in this
+    same process*, by definition (see worker_pool.py) — whatever
+    interpreter that happens to be right now, whether that's really
+    ``cache/pyenv/framework`` (the common case for real CLI usage,
+    enforced by ``pyenv.ensure_framework_env``) or some other venv
+    entirely (``TESTDRIVE_SKIP_PYENV_CHECK``, or the test suite calling
+    ``cli.main()`` directly — see ``pyenv.py``'s module docstring). So
+    an in-process check is *always* right for it, and checking whether
+    ``cache/pyenv/framework`` specifically exists/matches would be
+    wrong here — that path doesn't even exist in the
+    ``TESTDRIVE_SKIP_PYENV_CHECK`` case by design, which used to make
+    this function wrongly report every "framework" plugin as "not set
+    up" in exactly the scenario (the CI core-only smoke test) that most
+    needs an accurate in-process answer.
+
+    A plugin with its own *dedicated* pyenv (e.g. yolo11's "newenv") is
+    the opposite: this process is never that environment, full stop —
+    that was the actual original bug (checking imports in the
+    framework's site-packages, reporting a fully-provisioned plugin as
+    "missing" or an actually-missing one as "installed" by
+    coincidental name overlap). Probe the real target interpreter
+    out-of-process instead.
+
+    Deliberately does not go through ``worker_pool.py`` for dedicated
+    pyenvs — that would auto-provision (i.e. possibly download/install
+    something) just to answer a status query, which is exactly the
+    "-I isn't supposed to have side effects" property this function
+    exists to preserve. It only ever *looks*: at whether the
+    environment directory exists, and (via
+    ``pyenv.check_modules_installed``) at what's importable there.
+    """
+    from .pyenv import check_modules_installed, env_python_path, is_in_env
+
+    pyenv_name = loaded.manifest.pyenv
+    python_path = env_python_path(cd, pyenv_name)
+    pyenv_exists = python_path.exists()
+    pyenv_active = pyenv_exists and is_in_env(cd, pyenv_name)
+
+    if pyenv_name == "framework":
         try:
             instance = loaded.instantiate()
             installed, missing = instance.is_installed()
         except Exception as exc:  # noqa: BLE001
             installed, missing = False, [f"error: {exc}"]
-        results.append(
-            {
-                "id": loaded.manifest.id,
-                "backend": loaded.manifest.backend,
-                "installed": installed,
-                "missing": missing,
-            }
+    elif not pyenv_exists:
+        not_set_up_msg = (
+            f"'{pyenv_name}' environment not set up — run `testdrive -T {loaded.manifest.id}` "
+            "(or -TT) once to set it up automatically"
         )
+        installed, missing = False, [not_set_up_msg]
+    else:
+        installed, missing = check_modules_installed(python_path, loaded.manifest.requirements)
+
+    return {
+        "id": loaded.manifest.id,
+        "backend": loaded.manifest.backend,
+        "pyenv": pyenv_name,
+        "pyenv_path": str(python_path),
+        "pyenv_exists": pyenv_exists,
+        "pyenv_active": pyenv_active,
+        "installed": installed,
+        "missing": missing,
+    }
+
+
+def _framework_pyenv_line(cd: Path) -> str:
+    from .pyenv import env_python_path, is_in_env
+
+    python_path = env_python_path(cd)
+    exists = python_path.exists()
+    active = exists and is_in_env(cd)
+    if active:
+        state = "active — this is the interpreter running right now"
+    elif exists:
+        state = "not active — running from a different interpreter"
+    else:
+        state = "not set up"
+    return f"pyenv: framework  ({python_path})  [{state}]"
+
+
+def cmd_installed(as_json: bool, plugin_id: str | None = None) -> int:
+    """``-I``: installation status for every plugin, or just *plugin_id*
+    if given (``'*'`` behaves the same as omitting it — see LOOP_ALL).
+    """
+    from .cache import cache_dir
+
+    cd = cache_dir()
+
+    if plugin_id is not None and plugin_id != LOOP_ALL:
+        try:
+            loaded = load_plugin(plugin_id)
+        except PluginLoadError as exc:
+            log.error("plugin '%s' could not be loaded: %s", plugin_id, exc)
+            return ExitCode.PLUGIN_NOT_FOUND
+        loop = [loaded]
+    else:
+        loop = sorted(iter_loadable_plugins(), key=lambda p: p.manifest.id)
+
+    results = [_plugin_install_status(loaded, cd) for loaded in loop]
 
     if as_json:
         print(json.dumps(results, indent=2))
@@ -343,8 +445,17 @@ def cmd_installed(as_json: bool) -> int:
         print("No plugins found in testdrive/models/.")
         return ExitCode.SUCCESS
 
+    print(_framework_pyenv_line(cd))
+    print()
+
     for r in results:
         print(r["id"])
+        if r["pyenv"] == "framework":
+            state = "active" if r["pyenv_active"] else "not active"
+            print(f"    pyenv     : framework  [{state}]")
+        else:
+            state = "set up" if r["pyenv_exists"] else "not set up"
+            print(f"    pyenv     : {r['pyenv']}  ({r['pyenv_path']})  [{state}]")
         print(f"    installed : {'yes' if r['installed'] else 'no'}")
         if r["backend"]:
             print(f"    backend   : {r['backend']}")
@@ -725,7 +836,7 @@ def _run_detect_one(
     return ExitCode.SUCCESS, result, None
 
 
-_OWN_OUTPUT_PATTERNS = ("*-matches*.*", "*-redacted.*")
+_OWN_OUTPUT_PATTERNS = ("*-matches*.*", "*-redacted.*", "*_redactions.json")
 
 
 def _is_own_output_file(path: Path) -> bool:
@@ -733,7 +844,8 @@ def _is_own_output_file(path: Path) -> bool:
     or ``*-matches.*``/``*-matches<N>.*`` (the match count embedded in
     the filename, e.g. ``photo-matches3.png`` — see
     imageio.derive_output_paths) — including plugin-suffixed variants
-    like ``photo-owlv2-matches3.png``, which the glob's ``*`` covers too.
+    like ``photo-owlv2-matches3.png``, which the glob's ``*`` covers too
+    — or a ``*_redactions.json`` summary written for directory runs.
     """
     import fnmatch
 
@@ -745,9 +857,10 @@ def _expand_image_arg(image_arg: str) -> tuple[list[Path], str | None]:
 
     A file resolves to itself. A directory resolves to every file
     directly inside it (non-recursive), except ones matching our own
-    output pattern (``*-matches.*`` / ``*-redacted.*``) — so re-running
-    detection over a directory you've already run detection in doesn't
-    try to detect objects in your own annotated/redacted output images.
+    output pattern (``*-matches.*`` / ``*-redacted.*`` /
+    ``*_redactions.json``) — so re-running detection over a directory
+    you've already run detection in doesn't try to detect objects in
+    your own annotated/redacted output images.
 
     Files with an unrecognized extension are still included rather than
     filtered out here: ``load_image()`` already produces a clean
@@ -764,7 +877,8 @@ def _expand_image_arg(image_arg: str) -> tuple[list[Path], str | None]:
         if not candidates:
             return [], (
                 f"directory '{p}' has no input images "
-                "(after excluding *-matches.*/*-redacted.* output files)"
+                "(after excluding *-matches.*/*-redacted.*/*_redactions.json "
+                "output files)"
             )
         return candidates, None
 
@@ -826,6 +940,13 @@ def cmd_detect_dispatch(
     n_passed = 0
     n_total = 0
     json_out = []
+    # When the input is a directory, collect every detection into a
+    # per-plugin <plugin>_redactions.json written next to the images
+    # (or under --output-dir). Single-image runs never write this file.
+    is_imagedir = Path(image_arg).is_dir()
+    # Keyed by resolved manifest id (not the CLI arg, which may be a
+    # ../models_inactive/... path reference for parked plugins).
+    redactions_by_plugin: dict[str, list[dict[str, Any]]] = {}
 
     for image_path in image_paths:
         for plugin_id in plugin_ids:
@@ -859,6 +980,19 @@ def cmd_detect_dispatch(
                     json_out.append({"exit_code": exit_code, **result.to_dict()})
                 else:
                     print(result.summary())
+                if is_imagedir:
+                    rid = result.plugin_id
+                    if rid not in redactions_by_plugin:
+                        redactions_by_plugin[rid] = []
+                    for det in result.detections:
+                        redactions_by_plugin[rid].append(
+                            {
+                                "imagename": image_path.name,
+                                "rectangle": list(det.bbox),
+                                "label": det.label,
+                                "confidence": det.score,
+                            }
+                        )
             elif as_json:
                 json_out.append(
                     {
@@ -868,6 +1002,22 @@ def cmd_detect_dispatch(
                         "error": error,
                     }
                 )
+
+    if is_imagedir:
+        redactions_dir = output_dir if output_dir is not None else Path(image_arg)
+        try:
+            redactions_dir.mkdir(parents=True, exist_ok=True)
+            # Always write a file per successfully-resolved plugin that
+            # produced at least one DetectionResult (even if zero matches).
+            for rid, entries in redactions_by_plugin.items():
+                out_path = redactions_dir / f"{rid}_redactions.json"
+                out_path.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8")
+                log.info("wrote %s (%d match(es))", out_path, len(entries))
+                if not as_json:
+                    print(f"Redactions: {out_path}  ({len(entries)} match(es))")
+        except OSError as exc:
+            log.error("could not write redactions JSON: %s", exc)
+            any_failed = True
 
     if as_json:
         print(json.dumps(json_out, indent=2))
@@ -1167,7 +1317,9 @@ def _dispatch(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
             return cmd_manifest_loop(ns.json)
         return cmd_manifest(ns.manifest, ns.json)
     if ns.installed:
-        return cmd_installed(ns.json)
+        if ns.installed == LOOP_ALL:
+            return cmd_installed(ns.json)
+        return cmd_installed(ns.json, plugin_id=ns.installed)
     if ns.example_test:
         set_downloads_allowed(True)  # -TT explicitly populates the cache
         output_dir = Path(ns.output_dir) if ns.output_dir else None
