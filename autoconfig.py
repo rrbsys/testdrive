@@ -24,6 +24,8 @@ Behavior:
      - reuse <tdhome>/cache/pyenv/<sys.platform>/framework/{bin,Scripts}/python
        as the interpreter
      - for each plugin: print `testdrive -I <plugin>` install details
+     - with --force-provisioning: any plugin -I reports as 'installed: no'
+       gets provisioned via `testdrive -T <plugin>` first, then re-checked
 
 Both `-TT` and `-I` are invoked with TESTDRIVE_CACHE pinned to
 <tdhome>/cache. testdrive resolves its own cache/pyenv layout from
@@ -40,10 +42,11 @@ Usage:
     python autoconfig.py [options]
 
 Options (defaults shown):
-    --testdrive-remoteurl  https://github.com/rrbsys/testdrive/archive/refs/tags/v0.1.4.zip
+    --testdrive-remoteurl  https://github.com/rrbsys/testdrive/archive/refs/heads/main.zip
     --testdrive-home       <home>/testdrive
     --plugins              "yunet,yolo11"
     --python-path          "python"
+    --force-provisioning   (off) provision existing-home plugins reported as not installed
 """
 
 import argparse
@@ -69,7 +72,10 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Bootstrap or inspect a testdrive installation.")
     parser.add_argument(
         "--testdrive-remoteurl",
-        default="https://github.com/rrbsys/testdrive/archive/refs/tags/v0.1.4.zip",
+        default="https://github.com/rrbsys/testdrive/archive/refs/heads/main.zip",
+        # tag:    default="https://github.com/rrbsys/testdrive/archive/refs/tags/v0.1.4.zip",
+        # branch: default="https://github.com/rrbsys/testdrive/archive/refs/heads/some/branch.zip",
+        # commit: default="https://github.com/rrbsys/testdrive/archive/abcdef0.zip",
         help="URL of the testdrive source archive to download on first run.",
     )
     parser.add_argument(
@@ -86,6 +92,18 @@ def parse_args(argv=None):
         "--python-path",
         default="python",
         help="Python interpreter used to create the framework environment.",
+    )
+    parser.add_argument(
+        "--force-provisioning",
+        action="store_true",
+        help=(
+            "On an existing testdrive home, run `testdrive -T <plugin>` to "
+            "provision any plugin that `-I` currently reports as "
+            "'installed: no', then re-check and report its updated status. "
+            "By default, inspecting an existing home is read-only. No "
+            "effect on a fresh install - bootstrap already provisions "
+            "every plugin unconditionally."
+        ),
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logging.")
     return parser.parse_args(argv)
@@ -318,9 +336,13 @@ def _format_install_status(r: dict) -> str:
     return "\n".join(lines)
 
 
-def list_install_details(env_python: Path, td_home: Path, plugin: str):
-    """Return `testdrive -I <plugin>` install status, or None if the
-    interpreter/command isn't available at all."""
+def _query_install_status(env_python: Path, td_home: Path, plugin: str):
+    """Run `testdrive -I <plugin> --json` and return the raw status dict.
+
+    Returns the parsed dict on success, an error string if status
+    couldn't be determined (non-JSON output, plugin not found, etc.), or
+    None if the interpreter/command isn't available at all.
+    """
     try:
         result = subprocess.run(
             _testdrive_argv(env_python, "-I", plugin, "--json"),
@@ -347,7 +369,16 @@ def list_install_details(env_python: Path, td_home: Path, plugin: str):
     if isinstance(data, list):
         data = data[0] if data else {}
 
-    return _format_install_status(data)
+    return data
+
+
+def list_install_details(env_python: Path, td_home: Path, plugin: str):
+    """Return `testdrive -I <plugin>` install status as formatted text,
+    or None if the interpreter/command isn't available at all."""
+    status = _query_install_status(env_python, td_home, plugin)
+    if isinstance(status, dict):
+        return _format_install_status(status)
+    return status
 
 
 # --------------------------------------------------------------------------
@@ -404,7 +435,7 @@ def bootstrap(td_home: Path, remote_url: str, python_path: str, plugins):
     return report
 
 
-def inspect_existing(td_home: Path, plugins):
+def inspect_existing(td_home: Path, plugins, force_provisioning: bool = False):
     log.info("testdrive home %s exists - inspecting", td_home)
     env_python = framework_python(td_home)
 
@@ -413,8 +444,24 @@ def inspect_existing(td_home: Path, plugins):
 
     report = {}
     for plugin in plugins:
-        details = list_install_details(env_python, td_home, plugin)
-        report[plugin] = details or "(not installed / no status available)"
+        status = _query_install_status(env_python, td_home, plugin)
+
+        if force_provisioning and isinstance(status, dict) and not status.get("installed"):
+            # Same provisioning step bootstrap() already runs for every
+            # plugin up front (see run_testdrive_t()) - here it's only
+            # run for plugins that -I already confirmed are actually
+            # missing, so a normal `inspect_existing` run stays read-only
+            # by default.
+            log.info("Provisioning %s (currently reported as not installed)", plugin)
+            t_success, t_output = run_testdrive_t(env_python, td_home, plugin)
+            if not t_success:
+                log.warning("testdrive -T %s (provisioning) failed:\n%s", plugin, t_output)
+            status = _query_install_status(env_python, td_home, plugin)
+
+        if isinstance(status, dict):
+            report[plugin] = _format_install_status(status)
+        else:
+            report[plugin] = status or "(not installed / no status available)"
 
     return report
 
@@ -487,7 +534,7 @@ def main(argv=None):
     if not td_home.exists():
         report = bootstrap(td_home, args.testdrive_remoteurl, args.python_path, plugins)
     else:
-        report = inspect_existing(td_home, plugins)
+        report = inspect_existing(td_home, plugins, force_provisioning=args.force_provisioning)
 
     print_report(report)
 

@@ -69,7 +69,10 @@ PLUGIN = {
     "supports": ["face detection", "fast CPU inference", "no torch/transformers dependency"],
     "requirements": [
         {"pip": "Pillow", "module": "PIL"},
-        {"pip": "numpy", "module": "numpy"},
+        {
+            "pip": "numpy>=1,<2; sys_platform == 'darwin' and python_version <= '3.12'",
+            "module": "numpy",
+        },
         {"pip": "opencv-python", "module": "cv2"},
     ],
     "sample_prompt": "face",

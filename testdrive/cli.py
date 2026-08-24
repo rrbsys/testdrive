@@ -916,9 +916,15 @@ def cmd_detect_dispatch(
         log.error("%s", err)
         return ExitCode.IMAGE_UNREADABLE
 
-    # The common case: exactly one plugin, one image — behave exactly as
-    # a plain single detection run always has.
-    if len(plugin_ids) == 1 and len(image_paths) == 1:
+    # Directory runs (even with a single image) must go through the loop
+    # path so we always write <plugin>_redactions.json. Only a true
+    # single-file argument takes the short-circuit path.
+    is_imagedir = Path(image_arg).is_dir()
+
+    # The common case: exactly one plugin, one *file* — behave exactly as
+    # a plain single detection run always has. (A one-image directory is
+    # not this case; it still needs the redactions.json side-effect.)
+    if len(plugin_ids) == 1 and len(image_paths) == 1 and not is_imagedir:
         exit_code, result, error = _run_detect_one(
             plugin_ids[0],
             image_paths[0],
@@ -936,16 +942,14 @@ def cmd_detect_dispatch(
                 print(result.to_json())
         return exit_code
 
-    # Loop mode: cross product of plugins x images.
+    # Loop mode: cross product of plugins x images (also used for any
+    # directory argument, including a directory that contains only one
+    # image, so redactions.json is always produced for imagedir runs).
     multi_plugin = len(plugin_ids) > 1
     any_failed = False
     n_passed = 0
     n_total = 0
     json_out = []
-    # When the input is a directory, collect every detection into a
-    # per-plugin <plugin>_redactions.json written next to the images
-    # (or under --output-dir). Single-image runs never write this file.
-    is_imagedir = Path(image_arg).is_dir()
     # Keyed by resolved manifest id (not the CLI arg, which may be a
     # ../models_inactive/... path reference for parked plugins).
     redactions_by_plugin: dict[str, list[dict[str, Any]]] = {}

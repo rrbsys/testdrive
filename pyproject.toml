@@ -27,6 +27,7 @@ classifiers = [
 dependencies = [
     "Pillow>=10.0",  # currently the only requirement for cli/framework
     "certifi>=2024.0",  # CA bundle for download_file() on hosts with incomplete system trust stores (e.g. Win 8.1)
+    "numpy>=1,<2; sys_platform == 'darwin' and python_version <= '3.12'",
 ]
 
 [project.optional-dependencies]
@@ -49,12 +50,12 @@ dev = [
     "ruff>=0.4,<0.16",
     "mypy>=1.8",
     "numpy",  # for CI
+    "pipdeptree",
 ]
 # very general restrictions that only apply on mac dev machines (wine11
 # under macOS specifically) — kept out of the core `dependencies` list
 # so they don't leak into plain (e.g. Windows) installs.
 dev_mac = [
-    "Numpy~=1.0; python_version=='3.11'",  # lots of 3.11 modules can't live with numpy 2.x
     "Torch<2.5; sys_platform=='win32'",    # for wine11 on mac only
 ]
 

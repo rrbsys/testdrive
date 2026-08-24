@@ -143,6 +143,10 @@ PLUGIN = {
     "requirements": [
         {"pip": "Pillow", "module": "PIL"},
         {"pip": "torch>=2.2,<2.5", "module": "torch"},
+        {
+            "pip": "numpy>=1,<2; sys_platform == 'darwin' and python_version <= '3.12'",
+            "module": "numpy",
+        },
         {"pip": "ultralytics>=8.3", "module": "ultralytics"},
     ],
     "sample_prompt": "person",
