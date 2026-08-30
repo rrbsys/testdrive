@@ -26,6 +26,9 @@ Behavior:
      - for each plugin: print `testdrive -I <plugin>` install details
      - with --force-provisioning: any plugin -I reports as 'installed: no'
        gets provisioned via `testdrive -T <plugin>` first, then re-checked
+     - with --plugin-provisioning: re-run the full `-T` then `-TT` cycle
+       for every name in --plugins (retry after a partial bootstrap
+       failure such as running out of disk mid-install)
 
 Both `-TT` and `-I` are invoked with TESTDRIVE_CACHE pinned to
 <tdhome>/cache. testdrive resolves its own cache/pyenv layout from
@@ -47,6 +50,8 @@ Options (defaults shown):
     --plugins              "yunet,yolo11"
     --python-path          "python"
     --force-provisioning   (off) provision existing-home plugins reported as not installed
+    --plugin-provisioning  (off) re-run -T/-TT for every plugin in --plugins
+    --insecure             (off) skip TLS verify when downloading the source zip
 """
 
 import argparse
@@ -102,7 +107,33 @@ def parse_args(argv=None):
             "'installed: no', then re-check and report its updated status. "
             "By default, inspecting an existing home is read-only. No "
             "effect on a fresh install - bootstrap already provisions "
-            "every plugin unconditionally."
+            "every plugin unconditionally. Prefer --plugin-provisioning "
+            "when a previous bootstrap failed mid-plugin (e.g. disk full) "
+            "and you need the full -T/-TT cycle re-run for every plugin "
+            "in --plugins, not only those `-I` marks as missing."
+        ),
+    )
+    parser.add_argument(
+        "--plugin-provisioning",
+        action="store_true",
+        help=(
+            "On an existing testdrive home, re-run the full bootstrap "
+            "plugin cycle (`testdrive -T` then `-TT`) for every name in "
+            "--plugins, regardless of current `-I` status. Use after a "
+            "partial bootstrap failure (e.g. disk space ran out mid-"
+            "install) once the underlying problem is fixed. No effect on "
+            "a fresh install - bootstrap already does this. Implies the "
+            "home and framework env already exist."
+        ),
+    )
+    parser.add_argument(
+        "--insecure",
+        action="store_true",
+        help=(
+            "Skip TLS certificate verification when downloading the testdrive "
+            "source archive. Useful on corporate networks that intercept HTTPS "
+            "(CERTIFICATE_VERIFY_FAILED / unable to get local issuer certificate). "
+            "Prefer fixing the system/CA store when possible."
         ),
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logging.")
@@ -116,7 +147,34 @@ def split_plugins(raw):
 # --------------------------------------------------------------------------
 # Download / unpack
 # --------------------------------------------------------------------------
-def download_and_unpack(url: str, dest_dir: Path) -> Path:
+def _ssl_context(insecure: bool = False):
+    """Build an SSL context for the source-archive download.
+
+    Order of preference:
+      1. insecure=True  -> CERT_NONE (corporate MITM / broken CA store)
+      2. certifi CA bundle, if the package is importable
+      3. system default context
+    """
+    import ssl
+
+    if insecure:
+        log.warning(
+            "TLS certificate verification DISABLED (--insecure). Only use this on trusted networks."
+        )
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+
+    try:
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except ImportError:
+        return ssl.create_default_context()
+
+
+def download_and_unpack(url: str, dest_dir: Path, insecure: bool = False) -> Path:
     """Download `url` (a zip archive) and unpack it under dest_dir.
 
     Returns the path to the (single) top-level directory the archive
@@ -125,8 +183,26 @@ def download_and_unpack(url: str, dest_dir: Path) -> Path:
     log.info("Downloading testdrive source from %s", url)
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-    with urllib.request.urlopen(url) as resp:
-        data = resp.read()
+    ctx = _ssl_context(insecure=insecure)
+    try:
+        with urllib.request.urlopen(url, context=ctx) as resp:
+            data = resp.read()
+    except urllib.error.URLError as exc:
+        reason = str(exc.reason) if getattr(exc, "reason", None) else str(exc)
+        if "CERTIFICATE_VERIFY_FAILED" in reason or "certificate verify failed" in reason:
+            raise SystemExit(
+                f"Download failed: TLS certificate verification error:\n"
+                f"  {exc}\n\n"
+                f"Common on corporate Windows setups (SSL inspection / missing CA).\n"
+                f"Options:\n"
+                f"  1. Re-run with --insecure  (skips cert checks for this download)\n"
+                f"  2. Install/fix system CA certs for this Python, e.g.:\n"
+                f"       py -3.12 -m pip install certifi\n"
+                f"     or run the official 'Install Certificates.command' for the\n"
+                f"     Python.org installer, then retry without --insecure.\n"
+                f"  3. Pass a local zip via --testdrive-remoteurl file:///C:/path/to/testdrive.zip"
+            ) from exc
+        raise
 
     log.info("Unpacking archive into %s", dest_dir)
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
@@ -214,8 +290,19 @@ def _safe_cwd(env_python: Path) -> Path:
     interpreter directory (`.../bin` or `...\\Scripts`) is a safe, always-
     available choice - it does not, and cannot sensibly, contain a
     "testdrive" subdirectory.
+
+    If that directory does not exist yet (incomplete / missing framework
+    env), fall back to a directory that is known to exist so subprocess
+    does not raise NotADirectoryError (WinError 267) on Windows when the
+    parent of a missing python.exe is used as cwd.
     """
-    return env_python.parent
+    candidate = env_python.parent
+    if candidate.is_dir():
+        return candidate
+    for fallback in (candidate.parent, candidate.parent.parent, Path.cwd()):
+        if fallback.is_dir():
+            return fallback
+    return Path.cwd()
 
 
 def _supports_dash_p(env_python: Path) -> bool:
@@ -230,7 +317,7 @@ def _supports_dash_p(env_python: Path) -> bool:
             capture_output=True,
             text=True,
         )
-    except FileNotFoundError:
+    except (FileNotFoundError, NotADirectoryError, OSError):
         return False
     return result.returncode == 0 and result.stdout.strip() == "True"
 
@@ -292,7 +379,7 @@ def run_testdrive_t(env_python: Path, td_home: Path, plugin: str):
             env=testdrive_env(td_home),
             cwd=str(_safe_cwd(env_python)),
         )
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, NotADirectoryError, OSError) as exc:
         return False, str(exc)
 
     success = result.returncode == 0
@@ -315,7 +402,7 @@ def run_testdrive_tt(env_python: Path, td_home: Path, plugin: str):
             env=testdrive_env(td_home),
             cwd=str(_safe_cwd(env_python)),
         )
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, NotADirectoryError, OSError) as exc:
         return False, str(exc)
 
     success = result.returncode == 0
@@ -352,7 +439,9 @@ def _query_install_status(env_python: Path, td_home: Path, plugin: str):
             env=testdrive_env(td_home),
             cwd=str(_safe_cwd(env_python)),
         )
-    except FileNotFoundError:
+    except (FileNotFoundError, NotADirectoryError, OSError):
+        # Missing interpreter, or cwd/parent path invalid (WinError 267
+        # NotADirectoryError when the framework env was never created).
         return None
 
     if result.returncode != 0 and not result.stdout.strip():
@@ -384,11 +473,17 @@ def list_install_details(env_python: Path, td_home: Path, plugin: str):
 # --------------------------------------------------------------------------
 # Main flows
 # --------------------------------------------------------------------------
-def bootstrap(td_home: Path, remote_url: str, python_path: str, plugins):
+def bootstrap(
+    td_home: Path,
+    remote_url: str,
+    python_path: str,
+    plugins,
+    insecure: bool = False,
+):
     log.info("testdrive home %s does not exist - bootstrapping", td_home)
 
     td_home.mkdir(parents=True, exist_ok=True)
-    source_dir = download_and_unpack(remote_url, td_home / "src")
+    source_dir = download_and_unpack(remote_url, td_home / "src", insecure=insecure)
     env_python = create_framework_env(td_home, python_path)
 
     # Editable install (`-e`), not regular - this is required by
@@ -411,6 +506,20 @@ def bootstrap(td_home: Path, remote_url: str, python_path: str, plugins):
     # benefit and are a needless source of inconsistency.
     pip_install(env_python, "-e", ".[dev]", cwd=source_dir)
 
+    return provision_plugins(td_home, env_python, plugins)
+
+
+def provision_plugins(td_home: Path, env_python: Path, plugins) -> dict:
+    """Run the bootstrap plugin cycle for every name in *plugins*.
+
+    For each plugin: ``testdrive -T`` (provision deps / dedicated pyenv)
+    then ``testdrive -TT`` (example-image test). Report is keyed by plugin
+    id - install details on -TT success, ``FAILED: ...`` otherwise.
+
+    Shared by ``bootstrap()`` (fresh install) and the
+    ``--plugin-provisioning`` path on an existing home (retry after a
+    partial failure such as running out of disk mid-install).
+    """
     tt_results = {}
     for plugin in plugins:
         # -T first: provisions the plugin's dependencies (framework-env
@@ -440,7 +549,19 @@ def inspect_existing(td_home: Path, plugins, force_provisioning: bool = False):
     env_python = framework_python(td_home)
 
     if not env_python.exists():
-        log.warning("Expected framework python not found at %s", env_python)
+        # Incomplete home: directory exists but the framework venv was
+        # never created (partial bootstrap, hand-made folder, etc.).
+        # Do not call subprocess with a missing interpreter / cwd — on
+        # Windows that raises NotADirectoryError (WinError 267) instead
+        # of FileNotFoundError and used to crash the whole script.
+        msg = (
+            f"framework python not found at {env_python}\n"
+            "  (testdrive home exists but was never fully bootstrapped)\n"
+            "  Remove this directory and re-run autoconfig to bootstrap,\n"
+            "  or pass a different --testdrive-home."
+        )
+        log.warning("%s", msg)
+        return {plugin: msg for plugin in plugins}
 
     report = {}
     for plugin in plugins:
@@ -532,16 +653,51 @@ def main(argv=None):
     plugins = split_plugins(args.plugins)
 
     if not td_home.exists():
-        report = bootstrap(td_home, args.testdrive_remoteurl, args.python_path, plugins)
+        if args.plugin_provisioning:
+            log.error(
+                "--plugin-provisioning requires an existing testdrive home "
+                "(got missing path %s). Omit the flag to bootstrap from scratch.",
+                td_home,
+            )
+            sys.exit(2)
+        report = bootstrap(
+            td_home,
+            args.testdrive_remoteurl,
+            args.python_path,
+            plugins,
+            insecure=args.insecure,
+        )
+    elif args.plugin_provisioning:
+        env_python = framework_python(td_home)
+        if not env_python.exists():
+            log.error(
+                "framework python not found at %s — cannot run "
+                "--plugin-provisioning. Finish a normal bootstrap first "
+                "(or remove the incomplete home and re-run without the flag).",
+                env_python,
+            )
+            sys.exit(2)
+        log.info(
+            "Re-running -T/-TT provisioning cycle for: %s",
+            ", ".join(plugins),
+        )
+        report = provision_plugins(td_home, env_python, plugins)
     else:
         report = inspect_existing(td_home, plugins, force_provisioning=args.force_provisioning)
 
     print_report(report)
 
-    launcher = write_launcher(td_home)
-    print(f"\nFor manual use, run testdrive via: {launcher}")
+    env_python = framework_python(td_home)
+    if env_python.exists():
+        launcher = write_launcher(td_home)
+        print(f"\nFor manual use, run testdrive via: {launcher}")
+    else:
+        log.warning("Skipping launcher write: framework python missing at %s", env_python)
 
-    if any(str(v).startswith("FAILED") for v in report.values()):
+    if any(
+        str(v).startswith("FAILED") or "framework python not found" in str(v)
+        for v in report.values()
+    ):
         sys.exit(1)
 
 
