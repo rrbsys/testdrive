@@ -60,6 +60,8 @@ import json
 import logging
 import os
 import platform
+import shutil
+import socket
 import subprocess
 import sys
 import urllib.request
@@ -67,6 +69,8 @@ import zipfile
 from pathlib import Path
 
 log = logging.getLogger("autoconfig")
+
+__version__ = "v0.1.4"
 
 
 # --------------------------------------------------------------------------
@@ -91,12 +95,36 @@ def parse_args(argv=None):
     parser.add_argument(
         "--plugins",
         default="yunet,yolo11",
-        help="Comma separated list of plugins to try out / report on.",
+        help=(
+            "Comma separated list of plugins to try out / report on. "
+            "If this names an existing file instead, the plugin list is "
+            "read from it, one plugin name per line (blank lines and "
+            "lines starting with '#' are ignored)."
+        ),
     )
     parser.add_argument(
         "--python-path",
         default="python",
         help="Python interpreter used to create the framework environment.",
+    )
+    parser.add_argument(
+        "--remove-cache",
+        action="store_true",
+        help=(
+            "Remove <testdrive-home>/cache before doing anything else. "
+            "Forces the framework env and every plugin's pyenv to be "
+            "reprovisioned from scratch. No effect if the cache does not "
+            "exist yet. Ignored (superseded) if --remove-home is also given."
+        ),
+    )
+    parser.add_argument(
+        "--remove-home",
+        action="store_true",
+        help=(
+            "Remove the entire <testdrive-home> tree before doing "
+            "anything else, then bootstrap fresh as if it never existed. "
+            "No effect if the home does not exist yet."
+        ),
     )
     parser.add_argument(
         "--force-provisioning",
@@ -142,6 +170,21 @@ def parse_args(argv=None):
 
 def split_plugins(raw):
     return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+def load_plugins(raw):
+    """Resolve the --plugins value into a list of plugin names.
+
+    If *raw* names an existing file, the plugin list is read from it -
+    one name per line, blank lines and lines starting with '#' ignored.
+    Otherwise *raw* is treated as a comma separated list, as before.
+    """
+    path = Path(raw)
+    if path.is_file():
+        log.info("Reading plugin list from %s", path)
+        lines = path.read_text(encoding="utf-8").splitlines()
+        return [line.strip() for line in lines if line.strip() and not line.strip().startswith("#")]
+    return split_plugins(raw)
 
 
 # --------------------------------------------------------------------------
@@ -649,8 +692,36 @@ def main(argv=None):
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
+    log.info(
+        "This is autoconfig.py %s on python %s on %s@%s",
+        __version__,
+        platform.python_version(),
+        socket.gethostname(),
+        platform.platform(),
+    )
+
     td_home = Path(args.testdrive_home).expanduser()
-    plugins = split_plugins(args.plugins)
+    plugins = load_plugins(args.plugins)
+
+    if args.remove_home:
+        if td_home.exists():
+            log.info("Removing testdrive home %s (--remove-home)", td_home)
+            shutil.rmtree(td_home, ignore_errors=True)
+        else:
+            log.info(
+                "--remove-home given but %s does not exist - nothing to remove",
+                td_home,
+            )
+    elif args.remove_cache:
+        cache = cache_dir(td_home)
+        if cache.exists():
+            log.info("Removing cache %s (--remove-cache)", cache)
+            shutil.rmtree(cache, ignore_errors=True)
+        else:
+            log.info(
+                "--remove-cache given but %s does not exist - nothing to remove",
+                cache,
+            )
 
     if not td_home.exists():
         if args.plugin_provisioning:
