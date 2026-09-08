@@ -266,7 +266,13 @@ class WorkerHandle:
         response = json.loads(line)
         if response.get("ok"):
             return [
-                Detection(label=d["label"], score=d["score"], bbox=tuple(d["bbox"]))
+                Detection(
+                    label=d["label"],
+                    score=d["score"],
+                    bbox=tuple(d["bbox"]),
+                    text=d.get("text"),
+                    text_kind=d.get("text_kind"),
+                )
                 for d in response["detections"]
             ]
 
