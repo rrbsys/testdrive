@@ -41,12 +41,13 @@ import re
 import sys
 import tempfile
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
 from . import __version__
 from .annotate import draw_boxes, redact
-from .detection import DetectionResult, PluginManifest
+from .detection import Detection, DetectionResult, PluginManifest
 from .imageio import derive_output_paths, load_image, save_image
 from .pluginloader import PluginLoadError, display_name, iter_loadable_plugins, load_plugin
 from .util import (
@@ -150,6 +151,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="override a plugin's default model variant, for plugins that declare more "
         "than one (see manifest 'models', e.g. yolo11n/s/m/l/x). No effect on plugins "
         "with a single fixed model.",
+    )
+    parser.add_argument(
+        "--replace-minchar",
+        type=int,
+        default=None,
+        metavar="N",
+        help="override a plugin's manifest 'replace_minchar' (see manifest "
+        "'replace_eval'): detected text of length <= N is left as-is in the "
+        "'-redacted.*' output image. Only meaningful for plugins that emit "
+        "per-word/per-line detections (e.g. paddleocr's 'ocrword'/'ocrline' prompts).",
+    )
+    parser.add_argument(
+        "--replace-eval",
+        type=str,
+        default=None,
+        metavar="EXPR",
+        help="override a plugin's manifest 'replace_eval': a Python expression, "
+        "evaluated with 'text' bound to each detected word/line longer than "
+        "--replace-minchar, whose result replaces it in the '-redacted.*' output "
+        "image (e.g. \"text[:1] + '*' * (len(text) - 1)\"; an expression evaluating "
+        "to None falls back to a plain solid-black redaction for that one item). "
+        "Only meaningful for plugins that emit per-word/per-line detections (e.g. "
+        "paddleocr's 'ocrword'/'ocrline' prompts).",
     )
     parser.add_argument(
         "--no-auto-provision",
@@ -264,6 +288,10 @@ def _print_manifest_text(m: PluginManifest) -> None:
         print(f"Languages      : {', '.join(m.languages)}")
         if m.language:
             print(f"Default lang   : {m.language}")
+        print()
+    if m.replace_eval:
+        print(f"Replace minchar: {m.replace_minchar}  (override with --replace-minchar)")
+        print(f"Replace eval   : {m.replace_eval}  (override with --replace-eval)")
         print()
     if m.sample_prompt:
         print(f'Sample prompt  : "{m.sample_prompt}"')
@@ -561,6 +589,21 @@ def cmd_selftest_loop(as_json: bool, model_override: str | None = None) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _print_word_lang_stats(detections: list[Detection], *, as_json: bool) -> None:
+    """Print a short word-count-per-language line for per-word detections
+    (``Detection.text`` set — currently only paddleocr's ``ocrword``
+    prompt). A no-op for any other kind of detection, and for --json
+    output (already fully captured in the JSON itself).
+    """
+    if as_json:
+        return
+    stats = Counter(det.label.rsplit(":", 1)[-1] for det in detections if det.text is not None)
+    if not stats:
+        return
+    stats_str = ", ".join(f"{lang}={n}" for lang, n in sorted(stats.items()))
+    print(f"Word/lang: {stats_str}")
+
+
 def _run_detect_one(
     plugin_id: str,
     image_path: Path,
@@ -569,6 +612,8 @@ def _run_detect_one(
     plugin_suffix: str | None = None,
     output_dir: Path | None = None,
     model_override: str | None = None,
+    replace_minchar_override: int | None = None,
+    replace_eval_override: str | None = None,
 ) -> tuple[int, "DetectionResult | None", str | None]:
     """Run detection for a single (plugin, image) pair. Returns
     (exit_code, result, error).
@@ -595,6 +640,14 @@ def _run_detect_one(
             plugin.set_model_override(model_override)
         except ValueError as exc:
             return ExitCode.CLI_ERROR, None, str(exc)
+
+    # 1.6. --replace-minchar/--replace-eval override, if given. Same
+    # "static manifest data, safe before dependency checks" rationale
+    # as the --model override just above; a no-op for plugins that
+    # never emit per-word Detection.text (redact() only consults these
+    # fields for detections that carry .text — see annotate.redact()).
+    if replace_minchar_override is not None or replace_eval_override is not None:
+        plugin.set_replace_override(minchar=replace_minchar_override, expr=replace_eval_override)
 
     # Plugins with a non-"framework" pyenv can't be dependency-checked,
     # initialized, or run in this process at all — their dependencies
@@ -816,7 +869,15 @@ def _run_detect_one(
     )
     try:
         save_image(draw_boxes(image, detections), matches_path)
-        save_image(redact(image, detections), redacted_path)
+        save_image(
+            redact(
+                image,
+                detections,
+                replace_minchar=plugin.manifest.replace_minchar,
+                replace_eval=plugin.manifest.replace_eval,
+            ),
+            redacted_path,
+        )
     except (OSError, ImportError) as exc:
         return ExitCode.OUTPUT_WRITE_FAILED, None, f"could not save output images: {exc}"
 
@@ -887,6 +948,88 @@ def _expand_image_arg(image_arg: str) -> tuple[list[Path], str | None]:
     return [p], None
 
 
+def _finalize_plugin_word_outputs(
+    redactions_dir: Path,
+    rid: str,
+    entries: list[dict[str, Any]],
+    words: list[str],
+    *,
+    as_json: bool,
+) -> bool:
+    """Write ``<rid>_redactions.json`` (and, when *words* is non-empty,
+    ``<rid>_text.txt``), print the same summary lines the CLI has always
+    printed for a directory run, sanity-check the two files' line/item
+    counts against each other, and print/log a short word-lang
+    statistic. Returns False (and logs) on an OSError, True otherwise.
+    """
+    try:
+        redactions_dir.mkdir(parents=True, exist_ok=True)
+        out_path = redactions_dir / f"{rid}_redactions.json"
+        out_path.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8")
+        log.info("wrote %s (%d match(es))", out_path, len(entries))
+        if not as_json:
+            print(f"Redactions: {out_path}  ({len(entries)} match(es))")
+
+        # Per-word plugins (e.g. paddleocr's "ocrword"): also write a
+        # plain one-word-per-line text file, in the same detection
+        # order as the JSON above, plus a word-lang statistic and a
+        # sanity check that the two files agree on how many words were
+        # found.
+        if words:
+            text_path = redactions_dir / f"{rid}_text.txt"
+            text_path.write_text("\n".join(words) + "\n", encoding="utf-8")
+            log.info("wrote %s (%d word(s))", text_path, len(words))
+            if not as_json:
+                print(f"Text       : {text_path}  ({len(words)} word(s))")
+
+            written_lines = text_path.read_text(encoding="utf-8").splitlines()
+            if len(written_lines) != len(entries):
+                log.error(
+                    "%s: line count mismatch: %s has %d line(s), %s has %d item(s)",
+                    rid,
+                    text_path.name,
+                    len(written_lines),
+                    out_path.name,
+                    len(entries),
+                )
+
+            lang_stats = Counter(e["lang"] for e in entries if e.get("lang") is not None)
+            stats_str = ", ".join(f"{lang}={n}" for lang, n in sorted(lang_stats.items()))
+            log.info("%s: word-lang statistic: %s", rid, stats_str)
+            if not as_json:
+                print(f"Word/lang  : {stats_str}")
+        return True
+    except OSError as exc:
+        log.error("could not write redactions JSON: %s", exc)
+        return False
+
+
+def _collect_redaction_entry(
+    image_path: Path, det: "Detection"
+) -> tuple[dict[str, Any], str | None]:
+    """Build one ``<plugin>_redactions.json`` entry for *det*, plus the
+    detected text (if any) to append to ``<plugin>_text.txt``.
+    """
+    entry: dict[str, Any] = {
+        "imagename": image_path.name,
+        "rectangle": list(det.bbox),
+        "label": det.label,
+        "confidence": det.score,
+    }
+    if det.text is not None:
+        # Per-word/per-line detection (e.g. paddleocr's "ocrword" or
+        # "ocrline"): record the detected text under its own key —
+        # det.text_kind names that key ("word", "line", ...) so the
+        # framework doesn't need to know any particular plugin's
+        # granularity — plus the language it was recognized as, which
+        # is the suffix of the "<class>:<lang>" label convention (see
+        # module docstrings under models/).
+        entry[det.text_kind or "text"] = det.text
+        entry["lang"] = det.label.rsplit(":", 1)[-1] if ":" in det.label else None
+        return entry, det.text
+    return entry, None
+
+
 def cmd_detect_dispatch(
     plugin_arg: str,
     image_arg: str,
@@ -895,6 +1038,8 @@ def cmd_detect_dispatch(
     as_json: bool,
     output_dir: Path | None,
     model_override: str | None = None,
+    replace_minchar_override: int | None = None,
+    replace_eval_override: str | None = None,
 ) -> int:
     """Handle ``<plugin> <image> <prompt>``, where ``<plugin>`` may be
     ``'*'`` (every discovered plugin) and ``<image>`` may be a directory
@@ -932,14 +1077,36 @@ def cmd_detect_dispatch(
             threshold,
             output_dir=output_dir,
             model_override=model_override,
+            replace_minchar_override=replace_minchar_override,
+            replace_eval_override=replace_eval_override,
         )
         if error:
             log.error("%s", error)
         if result:
             print(result.summary())
+            _print_word_lang_stats(result.detections, as_json=as_json)
             if as_json:
                 print()
                 print(result.to_json())
+
+            # A word-detecting plugin (e.g. paddleocr's "ocrword") still
+            # produces <plugin>_redactions.json + <plugin>_text.txt even
+            # on a single-file run — not just directory runs — since
+            # otherwise this, the single most common way to invoke a
+            # detect run, would never produce them at all.
+            entries = []
+            words: list[str] = []
+            for det in result.detections:
+                entry, word = _collect_redaction_entry(image_paths[0], det)
+                entries.append(entry)
+                if word is not None:
+                    words.append(word)
+            if words:
+                out_dir = output_dir if output_dir is not None else image_paths[0].parent
+                if not _finalize_plugin_word_outputs(
+                    out_dir, result.plugin_id, entries, words, as_json=as_json
+                ):
+                    exit_code = ExitCode.OUTPUT_WRITE_FAILED
         return exit_code
 
     # Loop mode: cross product of plugins x images (also used for any
@@ -953,6 +1120,11 @@ def cmd_detect_dispatch(
     # Keyed by resolved manifest id (not the CLI arg, which may be a
     # ../models_inactive/... path reference for parked plugins).
     redactions_by_plugin: dict[str, list[dict[str, Any]]] = {}
+    # Parallel to redactions_by_plugin, but only the recognized word
+    # text for detections that carry one (Detection.text — currently
+    # just paddleocr's "ocrword" prompt), in the exact order they were
+    # detected. Becomes <plugin>_text.txt below.
+    words_by_plugin: dict[str, list[str]] = {}
 
     for image_path in image_paths:
         for plugin_id in plugin_ids:
@@ -972,6 +1144,8 @@ def cmd_detect_dispatch(
                 plugin_suffix=plugin_suffix,
                 output_dir=output_dir,
                 model_override=model_override,
+                replace_minchar_override=replace_minchar_override,
+                replace_eval_override=replace_eval_override,
             )
             if exit_code == ExitCode.SUCCESS:
                 n_passed += 1
@@ -986,19 +1160,18 @@ def cmd_detect_dispatch(
                     json_out.append({"exit_code": exit_code, **result.to_dict()})
                 else:
                     print(result.summary())
-                if is_imagedir:
-                    rid = result.plugin_id
-                    if rid not in redactions_by_plugin:
-                        redactions_by_plugin[rid] = []
-                    for det in result.detections:
-                        redactions_by_plugin[rid].append(
-                            {
-                                "imagename": image_path.name,
-                                "rectangle": list(det.bbox),
-                                "label": det.label,
-                                "confidence": det.score,
-                            }
-                        )
+                # Collected unconditionally (not just for is_imagedir):
+                # a word-detecting plugin (e.g. paddleocr's "ocrword")
+                # still needs its <plugin>_redactions.json/_text.txt
+                # even in a non-directory loop (e.g. '*' plugins against
+                # one file) — see the write-out step below.
+                rid = result.plugin_id
+                redactions_by_plugin.setdefault(rid, [])
+                for det in result.detections:
+                    entry, word = _collect_redaction_entry(image_path, det)
+                    if word is not None:
+                        words_by_plugin.setdefault(rid, []).append(word)
+                    redactions_by_plugin[rid].append(entry)
             elif as_json:
                 json_out.append(
                     {
@@ -1009,21 +1182,25 @@ def cmd_detect_dispatch(
                     }
                 )
 
-    if is_imagedir:
-        redactions_dir = output_dir if output_dir is not None else Path(image_arg)
-        try:
-            redactions_dir.mkdir(parents=True, exist_ok=True)
-            # Always write a file per successfully-resolved plugin that
-            # produced at least one DetectionResult (even if zero matches).
-            for rid, entries in redactions_by_plugin.items():
-                out_path = redactions_dir / f"{rid}_redactions.json"
-                out_path.write_text(json.dumps(entries, indent=2) + "\n", encoding="utf-8")
-                log.info("wrote %s (%d match(es))", out_path, len(entries))
-                if not as_json:
-                    print(f"Redactions: {out_path}  ({len(entries)} match(es))")
-        except OSError as exc:
-            log.error("could not write redactions JSON: %s", exc)
-            any_failed = True
+    # Always write a <plugin>_redactions.json for a directory run (the
+    # original behaviour), and additionally for *any* run — directory
+    # or not — where a plugin produced per-word detections (e.g.
+    # paddleocr's "ocrword"), since those also need their
+    # <plugin>_text.txt written out.
+    plugins_to_write = set(redactions_by_plugin) if is_imagedir else set(words_by_plugin)
+    if plugins_to_write:
+        redactions_dir = (
+            output_dir
+            if output_dir is not None
+            else (Path(image_arg) if is_imagedir else image_paths[0].parent)
+        )
+        for rid in plugins_to_write:
+            entries = redactions_by_plugin.get(rid, [])
+            words = words_by_plugin.get(rid, [])
+            if not _finalize_plugin_word_outputs(
+                redactions_dir, rid, entries, words, as_json=as_json
+            ):
+                any_failed = True
 
     if as_json:
         print(json.dumps(json_out, indent=2))
@@ -1353,6 +1530,8 @@ def _dispatch(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
             as_json=ns.json,
             output_dir=output_dir,
             model_override=ns.model,
+            replace_minchar_override=ns.replace_minchar,
+            replace_eval_override=ns.replace_eval,
         )
 
     positional = [x for x in (ns.plugin, ns.image, ns.prompt) if x]

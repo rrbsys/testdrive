@@ -149,13 +149,53 @@ def draw_boxes(
     return result
 
 
+#: The only builtins a manifest's ``replace_eval`` expression can reach —
+#: everything it should plausibly need to slice/measure/rebuild a piece
+#: of text (e.g. "text[:1] + '*' * (len(text) - 1)"), and nothing that
+#: reads files, imports modules, or otherwise escapes this one string.
+_REPLACE_EVAL_BUILTINS = {"len": len, "str": str, "min": min, "max": max}
+
+
+def _eval_replacement(text: str, expr: str) -> str | None:
+    """Evaluate *expr* (a manifest ``replace_eval``) with ``text`` bound
+    to the detected text, in a namespace restricted to
+    ``_REPLACE_EVAL_BUILTINS``.
+
+    Returns the masked replacement, or ``None`` if *expr* itself
+    evaluates to ``None`` — the caller's signal to skip the
+    white-box-with-text rendering entirely and fall back to a plain
+    solid-rectangle redaction, e.g. for an expression like
+    ``"None if text.isdigit() else text[:1] + '*' * (len(text) - 1)"``
+    that deliberately opts a particular piece of text out of masking.
+
+    Falls back to a full-mask of the same length (never ``None``) on
+    any evaluation error, so a bad/unexpected expression degrades
+    safely rather than crashing the whole redaction pass.
+    """
+    try:
+        result = eval(  # noqa: S307
+            expr, {"__builtins__": _REPLACE_EVAL_BUILTINS}, {"text": text}
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("redact: replace_eval %r failed on %r: %s", expr, text, exc)
+        return "*" * len(text)
+    return None if result is None else str(result)
+
+
+_REDACT_TEXT_BG = "#FFFFFF"  # white box behind a replace_eval'd item
+_REDACT_TEXT_FG = "#000000"  # black text drawn on top of it
+
+
 def redact(
     image: "PILImage.Image",
     detections: list[Detection],
     *,
     fill_color: str = _REDACT_COLOR,
+    replace_minchar: int = 0,
+    replace_eval: str = "",
+    font_size: int = 14,
 ) -> "PILImage.Image":
-    """Return a copy of *image* with solid rectangles over each detection.
+    """Return a copy of *image* with each detection redacted.
 
     Parameters
     ----------
@@ -164,7 +204,26 @@ def redact(
     detections:
         List of detections to redact.
     fill_color:
-        Fill colour for the redaction rectangles (default: black).
+        Fill colour for the plain solid-rectangle redaction (used
+        whenever a detection has no ``text``, *replace_eval* is empty
+        — i.e. the plugin isn't configured for word-/line-level
+        masking at all — or *replace_eval* evaluates to ``None`` for
+        that particular detection).
+    replace_minchar, replace_eval:
+        For detections that carry ``Detection.text`` (per-word/
+        per-line OCR detections — see ``PluginManifest.replace_minchar``/
+        ``replace_eval``), only used when *replace_eval* is non-empty:
+
+        * text of length <= *replace_minchar* is considered too short
+          to matter and is left completely untouched — no box is
+          drawn over it at all, so the original pixels show through.
+        * longer text is masked by evaluating *replace_eval* (with
+          ``text`` bound to the detected text). If the expression
+          evaluates to a real value, it's drawn as black text over a
+          white box (not the plain black rectangle used elsewhere), so
+          the redaction is legible rather than just an opaque block.
+          If it evaluates to ``None``, this detection instead falls
+          back to the plain solid-rectangle redaction.
     """
     _, ImageDraw = _get_draw_module()
 
@@ -175,8 +234,27 @@ def redact(
         log.debug("redact: no detections to redact")
         return result
 
+    font = _get_font(font_size) if replace_eval else None
+
     for det in detections:
-        draw.rectangle(list(det.bbox), fill=fill_color)
+        x1, y1, x2, y2 = det.bbox
+
+        if det.text and replace_eval:
+            text = det.text
+            if len(text) <= replace_minchar:
+                # Short enough to leave as-is: draw nothing, original
+                # pixels stay visible.
+                continue
+            masked = _eval_replacement(text, replace_eval)
+            if masked is not None:
+                draw.rectangle([x1, y1, x2, y2], fill=_REDACT_TEXT_BG)
+                if font is not None:
+                    draw.text((x1 + 2, y1 + 1), masked, fill=_REDACT_TEXT_FG, font=font)
+                continue
+            # replace_eval deliberately opted this one out (-> None):
+            # fall through to the plain solid-rectangle redaction below.
+
+        draw.rectangle([x1, y1, x2, y2], fill=fill_color)
 
     log.debug("redact: redacted %d detection(s)", len(detections))
     return result

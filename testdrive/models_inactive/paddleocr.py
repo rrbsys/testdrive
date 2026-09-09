@@ -1,18 +1,31 @@
 """PaddleOCR text-block detector plugin.
 
 Like ``yunet``, this is fixed-vocabulary rather than open-vocabulary:
-there's exactly one thing it ever reports — a "textblock" — so the
-first word of ``prompt`` must be ``"textblock"`` (case-insensitive) to
-confirm intent, mirroring how ``yunet`` gates on ``"face"``. An optional
-second word restricts to a language (``en``/``zh``/...). Prompt ``"ocr"``
-is a text task that dumps all recognized lines (see ``PLUGIN["tasks"]``).
+there's a small, fixed set of things it ever reports, so the first
+word of ``prompt`` must be one of ``"textblock"``/``"ocrword"``/
+``"ocrline"`` (case-insensitive) to confirm intent, mirroring how
+``yunet`` gates on ``"face"``. An optional second word restricts to a
+language (``en``/``zh``/...). Prompt ``"ocr"`` is a text task that
+dumps all recognized lines (see ``PLUGIN["tasks"]``).
+
+PaddleOCR only ever returns one box per recognized *line* — there's no
+finer geometry underneath. ``"textblock"`` reports exactly that: one
+Detection per line, no ``Detection.text``. ``"ocrword"`` and
+``"ocrline"`` both carry the recognized text on ``Detection.text``
+(and ``Detection.text_kind``, "word"/"line", used verbatim as the
+extra JSON key the framework adds to ``<plugin>_redactions.json`` —
+see cli.py): ``"ocrline"`` is the same one-box-per-line detection as
+"textblock" plus that line's own text (since PaddleOCR detects lines
+anyway, this is nearly free); ``"ocrword"`` further splits each line's
+text into individual words with an *approximated* per-word box (see
+``_split_into_words`` — real per-character geometry isn't available).
 
 Unlike a normal fixed-vocabulary detector though, each detection's
 *label* isn't just the class name — the framework's annotate.py
 renders whatever we put in ``Detection.label`` alongside the score, so
 this plugin follows the repo's ``<class>:<attribute>`` labeling
 convention to report each block's *detected language* as a suffix on
-the class name (``"textblock:en"``, ``"textblock:zh"``, ...), with
+the class name (``"textblock:en"``, ``"ocrline:zh"``, ...), with
 ``score`` being PaddleOCR's own recognition confidence for that block.
 That's what puts "language detected and confidence" on each green box
 without any framework changes — draw_boxes() already renders
@@ -35,16 +48,17 @@ plugin only runs the "ch" pipeline (Chinese + English), and a German
 text block will get *mis*-labeled ``"textblock:en"`` (Latin script with no CJK
 characters — see ``_is_cjk``) rather than going undetected. Revisit
 once the upstream PIR issue is fixed and a compatible German model
-line exists again; the ``_run_pipeline``/NMS-merge structure below is
-kept as-is (rather than simplified down to a single call) specifically
-so re-adding a second pipeline later is a two-line change, not a
-rewrite.
+line exists again; the ``_run_pipeline_raw``/NMS-merge structure below
+is kept as-is (rather than simplified down to a single call)
+specifically so re-adding a second pipeline later is a two-line
+change, not a rewrite.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+from collections import Counter
 from typing import TYPE_CHECKING, Any
 
 from ..cache import cache_dir
@@ -92,8 +106,17 @@ os.environ["FLAGS_enable_pir_api"] = "0"
 os.environ["FLAGS_enable_pir_in_executor"] = "0"
 os.environ["PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT"] = "0"
 
-# The only prompt this plugin ever honors — see the module docstring.
+# The three prompts this plugin ever honors — see the module docstring.
+# "textblock" reports one Detection per recognized line/block, with no
+# Detection.text. "ocrline" reports the same one-box-per-line
+# detections but with that line's recognized text on Detection.text
+# (text_kind="line"). "ocrword" splits each block into its individual
+# words and reports one Detection per word instead, with the word text
+# on Detection.text (text_kind="word") — see _split_into_words. All
+# three take the same optional second "<lang>" word (see _parse_prompt).
 _TEXTBLOCK_PROMPT = "textblock"
+_LINE_PROMPT = "ocrline"
+_WORD_PROMPT = "ocrword"
 
 # Greedy-NMS overlap threshold for merging multiple pipelines' candidate
 # boxes for the same physical text block (see module docstring — only
@@ -118,13 +141,17 @@ PLUGIN = {
     "api": PLUGIN_API,
     "description": (
         "OCR-based text block detection using PaddleOCR's PP-OCRv4 pipeline. "
-        "Fixed single-class vocabulary — it only detects text blocks, so "
-        "'prompt' isn't an open-vocabulary description; it must simply be "
-        "'textblock' to confirm intent (any other prompt reports nothing, "
-        "with a warning). Each box's label is 'textblock:<lang>' (e.g. "
-        "'textblock:en'), following the repo's <class>:<attribute> "
-        "labeling convention, with score as OCR confidence. Currently "
-        "English/Chinese only — see module docstring re: German."
+        "Fixed vocabulary — it only detects text blocks, so 'prompt' isn't an "
+        "open-vocabulary description; it must simply be 'textblock' (one box "
+        "per recognized line/block), 'ocrline' (same, plus the line's own "
+        "recognized text recorded on the detection), or 'ocrword' (one box "
+        "per recognized word, with the word text itself recorded on the "
+        "detection) to confirm intent, optionally followed by a language "
+        "(any other prompt reports nothing, with a warning). Each box's "
+        "label is '<textblock|ocrline|ocrword>:<lang>' (e.g. 'textblock:en'), "
+        "following the repo's <class>:<attribute> labeling convention, with "
+        "score as OCR confidence. Currently English/Chinese only — see "
+        "module docstring re: German."
     ),
     "author": "PaddlePaddle / Baidu",
     "homepage": "https://github.com/PaddlePaddle/PaddleOCR",
@@ -134,6 +161,8 @@ PLUGIN = {
     "task": "fixed-vocabulary (text-block-only) detection + language ID",
     "supports": [
         "text block detection",
+        "line-level detection ('ocrline') with per-line text + language",
+        "word-level detection ('ocrword') with per-word text + language",
         "en/zh recognition in one image",
         "per-box language label + OCR confidence",
     ],
@@ -151,12 +180,21 @@ PLUGIN = {
     # avoids the exact "one plugin's upgrade breaks everyone else"
     # problem PluginManifest.pyenv's docstring warns about.
     "pyenv": "paddleocr",
-    "classes": [_TEXTBLOCK_PROMPT],
+    "classes": [_TEXTBLOCK_PROMPT, _LINE_PROMPT, _WORD_PROMPT],
     "language": "en",
     "languages": ["en", "zh", "de-not_implemented_yet"],
     "tasks": {
         "ocr": "ocr",
     },
+    # 'ocrword'/'ocrline' detections carry their recognized text as
+    # Detection.text (see _split_into_words); these two fields tell the
+    # framework how to mask that text when rendering the '-redacted.*'
+    # output image (and are the defaults --replace-minchar/
+    # --replace-eval override): text of 4 chars or fewer is left as-is,
+    # longer text is masked down to its 1st character followed by
+    # asterisks.
+    "replace_minchar": 4,
+    "replace_eval": "text[:1] + '*' * (len(text) - 1)",
 }
 
 
@@ -205,6 +243,47 @@ def _parse_prompt(prompt: str) -> tuple[str, str | None]:
     return cls, lang
 
 
+def _split_into_words(
+    text: str, bbox: tuple[int, int, int, int]
+) -> list[tuple[str, tuple[int, int, int, int]]]:
+    """Split one recognized line's *text* into words, approximating a
+    per-word bounding box for each.
+
+    PaddleOCR only ever returns one box per recognized *line*, not per
+    word — there's no per-character geometry to draw on. This carves
+    the line's box horizontally in proportion to each word's share of
+    the line's character count (words themselves, plus the single
+    space assumed between them, contributing to that share), which is
+    a reasonable approximation for roughly-horizontal, roughly
+    monospaced-in-effect text and is enough to give each detected word
+    its own (approximate) box rather than repeating the whole line's
+    box for every word. Vertical extent is left unchanged.
+    """
+    words = text.split()
+    if not words:
+        return []
+    if len(words) == 1:
+        return [(words[0], bbox)]
+
+    x1, y1, x2, y2 = bbox
+    width = max(0, x2 - x1)
+    # Each word's "share" of the line includes a trailing space (except
+    # the very last word), so the proportions reflect on-screen spacing
+    # rather than just letter count.
+    shares = [len(w) + 1 for w in words[:-1]] + [len(words[-1])]
+    total = sum(shares) or 1
+
+    out: list[tuple[str, tuple[int, int, int, int]]] = []
+    cursor = x1
+    for word, share in zip(words, shares):
+        w_width = round(width * share / total)
+        wx1 = cursor
+        wx2 = min(x2, wx1 + w_width)
+        out.append((word, (wx1, y1, max(wx1, wx2), y2)))
+        cursor = wx2
+    return out
+
+
 class Plugin(DetectorPlugin):
     """PaddleOCR fixed single-class (textblock) detector with language ID."""
 
@@ -242,19 +321,22 @@ class Plugin(DetectorPlugin):
         self._initialized = True
         log.info("PaddleOCR ready")
 
-    def _run_pipeline(
+    def _run_pipeline_raw(
         self, ocr: Any, img_bgr: Any, *, fixed_label: str | None, threshold: float
-    ) -> list[Detection]:
+    ) -> list[tuple[str, float, tuple[int, int, int, int], str]]:
         """Run one PaddleOCR pipeline over the full image.
 
+        Returns raw ``(text, score, bbox, lang)`` tuples above
+        *threshold*, one per recognized line/block — the shared basis
+        for both the "textblock" (block-level) and "ocrword"
+        (word-level, via :func:`_split_into_words`) detection modes.
+
         *fixed_label* is the language to report for every detection
-        from this pipeline (e.g. "de"), or ``None`` to decide per-box
+        from this pipeline (e.g. "de"), or ``None`` to decide per-block
         via :func:`_is_cjk` (the "ch" pipeline, which recognizes both
-        Chinese and English). Either way the final ``Detection.label``
-        is ``"textblock:<lang>"``, per the repo's ``<class>:<attribute>``
-        convention (see module docstring) — not just the bare language.
+        Chinese and English).
         """
-        out: list[Detection] = []
+        out: list[tuple[str, float, tuple[int, int, int, int], str]] = []
         for page in ocr.predict(input=img_bgr):
             texts = page["rec_texts"]
             scores = page["rec_scores"]
@@ -265,8 +347,7 @@ class Plugin(DetectorPlugin):
                     continue
                 x1, y1, x2, y2 = (int(v) for v in box)
                 lang = fixed_label if fixed_label else ("zh" if _is_cjk(text) else "en")
-                label = f"{_TEXTBLOCK_PROMPT}:{lang}"
-                out.append(Detection(label=label, score=score, bbox=(x1, y1, x2, y2)))
+                out.append((str(text), score, (x1, y1, x2, y2), lang))
         return out
 
     def _collect_texts(self, img_bgr: Any) -> list[str]:
@@ -295,23 +376,30 @@ class Plugin(DetectorPlugin):
     def detect(
         self, image: "PILImage.Image", prompt: str, threshold: float = 0.5
     ) -> list[Detection]:
-        """Detect text blocks and label each with its language + OCR confidence.
+        """Detect text and label each with its language + OCR confidence.
 
-        ``prompt`` must be ``"textblock"`` (case-insensitive) — see the
-        module docstring. Anything else never matches, with a warning
-        logged rather than raising, matching ``yunet``/``yolo11``'s
-        handling of an unknown class/prompt so a loop-mode run over
-        several plugins doesn't blow up on a prompt that just isn't
-        this plugin's.
+        ``prompt`` must be ``"textblock"`` (one Detection per
+        recognized line/block, no ``Detection.text``), ``"ocrline"``
+        (the same one-box-per-line detections, but with that line's
+        text on ``Detection.text``), or ``"ocrword"`` (one Detection
+        per recognized word, with the word text on ``Detection.text``)
+        — case-insensitive, optionally followed by a language — see
+        the module docstring. Anything else never matches, with a
+        warning logged rather than raising, matching ``yunet``/
+        ``yolo11``'s handling of an unknown class/prompt so a loop-mode
+        run over several plugins doesn't blow up on a prompt that just
+        isn't this plugin's.
         """
         if not self._initialized:
             self.initialize()
 
         cls, force_lang = _parse_prompt(prompt)
-        if cls != _TEXTBLOCK_PROMPT:
+        if cls not in (_TEXTBLOCK_PROMPT, _LINE_PROMPT, _WORD_PROMPT):
             log.warning(
-                "paddleocr only detects '%s'; prompt '%s' will never match",
+                "paddleocr only detects '%s', '%s' or '%s'; prompt '%s' will never match",
                 _TEXTBLOCK_PROMPT,
+                _LINE_PROMPT,
+                _WORD_PROMPT,
                 prompt,
             )
             return []
@@ -345,18 +433,81 @@ class Plugin(DetectorPlugin):
         img_bgr = cv2.cvtColor(np.array(image.convert("RGB")), cv2.COLOR_RGB2BGR)
 
         # Only the "ch" (Chinese+English) pipeline runs for now — see
-        # module docstring re: German. Kept as a list + NMS pass rather
-        # than a single flat call so a second pipeline can be added
-        # back with a one-line append once German is unblocked upstream.
-        candidates = self._run_pipeline(
-            self._ocr_cjk, img_bgr, fixed_label=None, threshold=threshold
-        )
+        # module docstring re: German. Kept as a raw-tuple list rather
+        # than building Detections directly so a second pipeline can be
+        # added back with a one-line append once German is unblocked
+        # upstream, and so "ocrword"/"ocrline" can re-use the same raw
+        # results instead of running OCR twice.
+        raw = self._run_pipeline_raw(self._ocr_cjk, img_bgr, fixed_label=None, threshold=threshold)
 
         if force_lang is not None:
-            candidates = [d for d in candidates if d.label.endswith(f":{force_lang}")]
+            raw = [r for r in raw if r[3] == force_lang]
 
+        if cls == _WORD_PROMPT:
+            # Word mode: no NMS pass, and no re-sorting by score — with
+            # a single pipeline there's nothing to de-duplicate across,
+            # and the ordering here becomes the "sequence of detection"
+            # that <plugin>_text.txt / <plugin>_redactions.json rely on
+            # (see cli.py's directory-loop path).
+            kept: list[Detection] = []
+            for text, score, bbox, lang in raw:
+                for word, wbbox in _split_into_words(text, bbox):
+                    kept.append(
+                        Detection(
+                            label=f"{_WORD_PROMPT}:{lang}",
+                            score=score,
+                            bbox=wbbox,
+                            text=word,
+                            text_kind="word",
+                        )
+                    )
+
+            stats = Counter(det.label.rsplit(":", 1)[-1] for det in kept)
+            log.info(
+                "ocrword: word-lang statistic: %s (%d word(s) total)",
+                dict(sorted(stats.items())),
+                len(kept),
+            )
+            return kept
+
+        if cls == _LINE_PROMPT:
+            # Same one-box-per-line detections as "textblock", plus the
+            # line's own text — same NMS/sort treatment as "textblock"
+            # below since it's the same underlying geometry.
+            candidates = [
+                Detection(
+                    label=f"{_LINE_PROMPT}:{lang}",
+                    score=score,
+                    bbox=bbox,
+                    text=text,
+                    text_kind="line",
+                )
+                for text, score, bbox, lang in raw
+            ]
+            candidates.sort(key=lambda d: d.score, reverse=True)
+            kept = []
+            for det in candidates:
+                if any(_iou(det.bbox, k.bbox) > _NMS_IOU_THRESHOLD for k in kept):
+                    continue
+                kept.append(det)
+
+            stats = Counter(det.label.rsplit(":", 1)[-1] for det in kept)
+            log.info(
+                "ocrline: word-lang statistic: %s (%d line(s) total)",
+                dict(sorted(stats.items())),
+                len(kept),
+            )
+            return kept
+
+        # Block mode ("textblock"): dedupe overlapping candidate blocks
+        # (relevant once a second pipeline is re-added — see module
+        # docstring) by descending confidence.
+        candidates = [
+            Detection(label=f"{_TEXTBLOCK_PROMPT}:{lang}", score=score, bbox=bbox)
+            for text, score, bbox, lang in raw
+        ]
         candidates.sort(key=lambda d: d.score, reverse=True)
-        kept: list[Detection] = []
+        kept = []
         for det in candidates:
             if any(_iou(det.bbox, k.bbox) > _NMS_IOU_THRESHOLD for k in kept):
                 continue

@@ -34,7 +34,9 @@ stdout file descriptor is reserved for these lines only — see
 
         # response to "detect" (one line per request)
         {"ok": true, "detections": [{"label": str, "score": float,
-                                      "bbox": [int, int, int, int]}, ...]}
+                                      "bbox": [int, int, int, int],
+                                      "text": str | null,
+                                      "text_kind": str | null}, ...]}
         {"ok": false, "kind": "missing_dependency", "missing": [str, ...]}
         {"ok": false, "kind": "cache_not_populated", "message": str}
         {"ok": false, "kind": "error", "message": str}
@@ -296,7 +298,13 @@ def main(argv: list[str]) -> int:
                 {
                     "ok": True,
                     "detections": [
-                        {"label": d.label, "score": d.score, "bbox": list(d.bbox)}
+                        {
+                            "label": d.label,
+                            "score": d.score,
+                            "bbox": list(d.bbox),
+                            "text": d.text,
+                            "text_kind": d.text_kind,
+                        }
                         for d in detections
                     ],
                 }

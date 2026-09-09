@@ -98,3 +98,22 @@ class DetectorPlugin(ABC):
                 f"choices: {', '.join(self.manifest.models)}"
             )
         self.manifest = replace(self.manifest, model=model)
+
+    def set_replace_override(self, *, minchar: int | None = None, expr: str | None = None) -> None:
+        """Override ``manifest.replace_minchar``/``replace_eval`` (the
+        CLI's ``--replace-minchar``/``--replace-eval``).
+
+        Either argument may be given on its own — ``None`` leaves that
+        half of the manifest's own default untouched. Applies to any
+        plugin (the fields default to "off" for plugins that never
+        emit per-word ``Detection.text``, so this is a no-op for them
+        in practice), same replace()-not-mutate rationale as
+        ``set_model_override``.
+        """
+        updates: dict[str, Any] = {}
+        if minchar is not None:
+            updates["replace_minchar"] = minchar
+        if expr is not None:
+            updates["replace_eval"] = expr
+        if updates:
+            self.manifest = replace(self.manifest, **updates)

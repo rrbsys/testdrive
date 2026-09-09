@@ -22,6 +22,26 @@ class Detection:
     score: float
     bbox: tuple[int, int, int, int]
 
+    #: The specific text this detection represents (e.g. one recognized
+    #: word or line), when the plugin detects individual pieces of text
+    #: rather than just a class label (see paddleocr's ``ocrword``/
+    #: ``ocrline`` prompts). ``None`` for plain class-label detections,
+    #: which is every plugin except word-/line-level OCR. The framework
+    #: uses this to add a ``text_kind`` field (see below) — and a
+    #: derived "lang", from the ``<class>:<lang>`` label suffix — to
+    #: ``<plugin>_redactions.json`` entries, and to collect
+    #: ``<plugin>_text.txt`` — see cli.py's directory-loop path.
+    text: str | None = None
+
+    #: What kind of text ``text`` holds — e.g. ``"word"`` or ``"line"``
+    #: — used verbatim as that field's key in ``<plugin>_redactions.json``
+    #: entries (so a "word" plugin gets a "word" field, a "line" plugin
+    #: gets a "line" field, etc., without the framework needing to know
+    #: about any particular plugin's granularity). Only meaningful when
+    #: ``text`` is set; a plugin that sets ``text`` should always set
+    #: this too (the framework falls back to a plain "text" key if not).
+    text_kind: str | None = None
+
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -230,6 +250,28 @@ class PluginManifest:
     #: invocation, so a loop-mode run over many images pays that
     #: plugin's initialize() cost once, not once per image.
     pyenv: str = "framework"
+
+    #: For plugins that emit per-word/per-text-item detections (see
+    #: ``Detection.text``): a redaction rule applied when rendering the
+    #: ``-redacted.*`` output image and used as the default for the
+    #: CLI's ``--replace-minchar``/``--replace-eval`` overrides.
+    #:
+    #: ``replace_minchar`` is the minimum text length a detected item
+    #: must exceed before ``replace_eval`` is applied at all — shorter
+    #: text (length <= this) is left exactly as detected, mirroring
+    #: the redact-short-strings-as-is convention used elsewhere in this
+    #: codebase. ``replace_eval`` is a Python expression, evaluated
+    #: with a single local variable ``text`` bound to the detected
+    #: text, whose result replaces it in the rendered redaction (e.g.
+    #: ``"text[:1] + '*' * (len(text) - 1)"`` keeps the 1st character
+    #: and masks the rest; an expression that evaluates to ``None``
+    #: falls back to a plain solid-rectangle redaction for that one
+    #: item, same as if ``replace_eval`` were empty). Both default to
+    #: "off" (0 / "") for plugins that don't detect individual
+    #: words/lines, in which case redact() always uses a plain solid
+    #: rectangle.
+    replace_minchar: int = 0
+    replace_eval: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PluginManifest":
