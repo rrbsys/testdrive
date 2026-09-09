@@ -23,6 +23,7 @@ needs to change.
 | `yolo11` | YOLO11 | fixed 80-class COCO vocabulary (not open-vocabulary like the rest — see below), fast, own `pyenv` |
 | `yunet` | YuNet | fixed single-class (face-only) detection — prompt must be `"face"` — see below; fast CPU-only OpenCV DNN, no torch |
 | `paddleocr` | PaddleOCR | fixed single-class (text-block-only) detection — prompt must be `"textblock"` — labels each box with detected language (currently en/zh; German pending an upstream paddle bug fix — see plugin docstring) + OCR confidence instead of a class name; own `pyenv` |
+| `east` | EAST | fixed vocabulary, geometry-only scene-text detector (no recognition) — prompt must be `"wordblock"` or `"lineblock"` — see below; fast CPU-only OpenCV DNN, no torch |
 
 Three plugins are parked in `testdrive/models_inactive/` (a sibling of
 `testdrive/models/`, not a subpackage of it — so its files use the
@@ -79,6 +80,16 @@ intent; anything else reports nothing, with a warning. It's the only
 plugin here that doesn't use torch/transformers at all — just OpenCV's
 DNN module and a ~230KB onnx checkpoint — so it's by far the lightest
 and fastest plugin to install and run.
+
+**`east`** is fixed-vocabulary and geometry-only: `prompt` must be
+`"wordblock"` (one box per detected text region) or `"lineblock"`
+(those same regions grouped into lines — a post-processing step this
+plugin adds, not a second model capability); anything else reports
+nothing, with a warning. Unlike `paddleocr`'s similarly-shaped
+`"ocrword"`/`"ocrline"` prompts, EAST never recognizes *what* the text
+says — only *where* it is — hence the `*block` naming (bbox-only, same
+family as `paddleocr`'s own `"textblock"`) rather than `ocr*`. Like
+`yunet`, it's OpenCV DNN only, no torch/transformers.
 
 ## The framework's own environment
 
