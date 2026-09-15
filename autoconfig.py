@@ -52,6 +52,9 @@ Options (defaults shown):
     --force-provisioning   (off) provision existing-home plugins reported as not installed
     --plugin-provisioning  (off) re-run -T/-TT for every plugin in --plugins
     --insecure             (off) skip TLS verify when downloading the source zip
+    --check-installed      (off) report mode: warn + exit 1 if any --plugins
+                            entry comes back 'installed : no'. Requires
+                            --plugins to be given explicitly.
 """
 
 import argparse
@@ -71,6 +74,14 @@ from pathlib import Path
 log = logging.getLogger("autoconfig")
 
 __version__ = "v0.1.4"
+
+DEFAULT_PLUGINS = "yunet,yolo11"
+
+# Sentinel so parse_args() can tell "--plugins was left at its default"
+# apart from "the user typed --plugins yunet,yolo11" -- needed to
+# enforce --check-installed's "requires --plugins explicitly" rule
+# without a false negative if someone happens to type the default value.
+_PLUGINS_UNSET = object()
 
 
 # --------------------------------------------------------------------------
@@ -94,12 +105,12 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--plugins",
-        default="yunet,yolo11",
+        default=_PLUGINS_UNSET,
         help=(
             "Comma separated list of plugins to try out / report on. "
             "If this names an existing file instead, the plugin list is "
             "read from it, one plugin name per line (blank lines and "
-            "lines starting with '#' are ignored)."
+            f"lines starting with '#' are ignored). Default: {DEFAULT_PLUGINS}"
         ),
     )
     parser.add_argument(
@@ -164,8 +175,29 @@ def parse_args(argv=None):
             "Prefer fixing the system/CA store when possible."
         ),
     )
+    parser.add_argument(
+        "--check-installed",
+        action="store_true",
+        help=(
+            "Report mode: after printing the usual per-plugin report, warn "
+            "about and exit 1 if any plugin named in --plugins comes back "
+            "'installed : no'. Requires --plugins to be given explicitly "
+            f"(rather than left at its default of {DEFAULT_PLUGINS}) -- "
+            "this flag is for asserting a specific, deliberate set of "
+            "plugins is installed, not for a casual try-out list."
+        ),
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logging.")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+
+    plugins_explicit = args.plugins is not _PLUGINS_UNSET
+    if args.plugins is _PLUGINS_UNSET:
+        args.plugins = DEFAULT_PLUGINS
+
+    if args.check_installed and not plugins_explicit:
+        parser.error("--check-installed requires --plugins to be given explicitly.")
+
+    return args
 
 
 def split_plugins(raw):
@@ -522,11 +554,39 @@ def bootstrap(
     python_path: str,
     plugins,
     insecure: bool = False,
+    reuse_existing_source: bool = False,
 ):
     log.info("testdrive home %s does not exist - bootstrapping", td_home)
 
     td_home.mkdir(parents=True, exist_ok=True)
-    source_dir = download_and_unpack(remote_url, td_home / "src", insecure=insecure)
+
+    # --remove-cache only wipes cache/ (the venvs), not src/ -- so if that's
+    # what triggered this bootstrap, the source checkout from the previous
+    # run is still sitting right there under td_home/src and re-downloading
+    # + re-unpacking it is pure waste (and an extra network dependency for
+    # what should be a fast "just rebuild the venv" operation).
+    src_root = td_home / "src"
+    source_dir = None
+    if reuse_existing_source and src_root.is_dir():
+        candidates = [p for p in src_root.iterdir() if p.is_dir()]
+        if len(candidates) == 1:
+            source_dir = candidates[0]
+            log.info(
+                "--remove-cache: reusing existing source checkout %s (skipping download+unpack)",
+                source_dir,
+            )
+        elif candidates:
+            log.warning(
+                "--remove-cache: expected exactly one existing source dir "
+                "under %s, found %d (%s) - re-downloading fresh instead",
+                src_root,
+                len(candidates),
+                [p.name for p in candidates],
+            )
+
+    if source_dir is None:
+        source_dir = download_and_unpack(remote_url, src_root, insecure=insecure)
+
     env_python = create_framework_env(td_home, python_path)
 
     # Editable install (`-e`), not regular - this is required by
@@ -649,11 +709,45 @@ def write_launcher(td_home: Path) -> Path:
     means a person never has to remember `set/export TESTDRIVE_CACHE=...`
     by hand to use testdrive directly.
 
-    Uses the console-script entry point (not `-m testdrive`), which also
-    sidesteps the separate cwd/sys.path shadowing issue `-m` can hit when
-    run from a directory that has - or sits next to - one literally
-    named "testdrive" (see _safe_cwd()/_testdrive_argv() above, and the
-    same-shaped fix applied directly in testdrive's own __main__.py).
+    Uses the console-script entry point (not `-m testdrive`), which
+    sidesteps the cwd/sys.path shadowing issue on POSIX: running
+    framework/bin/testdrive directly makes Python set sys.path[0] to that
+    script's own directory, not the caller's cwd, so a cwd that has - or
+    sits inside - a directory literally named "testdrive" can't shadow
+    the real installed package (see _safe_cwd()/_testdrive_argv() above,
+    and the same-shaped fix applied directly in testdrive's own
+    __main__.py).
+
+    This does NOT hold on Windows: pip's generated console-script .exe
+    (framework/Scripts/testdrive.exe) is not a plain interpreted script -
+    it's a launcher stub that runs its embedded entry point via runpy,
+    and runpy-style execution (like `python -m`) always inserts the
+    *caller's* cwd into sys.path[0], regardless of where the .exe itself
+    lives. If the caller's cwd is, or contains, a directory literally
+    named "testdrive" (exactly what a default --testdrive-home of
+    ".\testdrive" produces), that directory can get imported as an empty
+    namespace package ahead of the real one, surfacing as
+    "ImportError: cannot import name '__version__' from 'testdrive'
+    (unknown location)" - "unknown location" being the tell for a
+    namespace-package shadow.
+
+    Getting into the exe's own directory before invoking it fixes that,
+    but on Windows a plain `cd` is itself a hazard the POSIX side never
+    has: a .bat runs *inside the caller's own cmd.exe process* (POSIX's
+    `exec` instead replaces a forked child, never touching the caller's
+    shell at all), so a bare `cd /d` here would permanently change the
+    caller's directory if this launcher is invoked directly at a prompt
+    or via `call` from another script. testdrive.bat / testdrive.sh are
+    meant to be safe to call from anywhere without leaving any trace on
+    the caller's process (cwd or environment) - so this uses
+    pushd/popd (self-restoring, and it also transparently handles
+    mapped/UNC drives like "Z:\") plus setlocal/endlocal to scope every
+    variable this launcher sets, with the `endlocal & exit /b %TD_RC%`
+    idiom to still relay testdrive's real exit code after endlocal would
+    otherwise have wiped it. (One honest caveat: cmd.exe has no
+    try/finally equivalent, so if someone hits Ctrl+C mid-run and
+    answers "Y" to its "Terminate batch job?" prompt, cleanup is skipped
+    - a limitation of batch scripting itself, not of this approach.)
     """
     env_python = framework_python(td_home)
     testdrive_exe = env_python.parent / (
@@ -664,7 +758,14 @@ def write_launcher(td_home: Path) -> Path:
     if platform.system() == "Windows":
         launcher = td_home / "testdrive.bat"
         launcher.write_text(
-            f'@echo off\r\nset "TESTDRIVE_CACHE={cache}"\r\n"{testdrive_exe}" %*\r\n',
+            "@echo off\r\n"
+            "setlocal\r\n"
+            f'set "TESTDRIVE_CACHE={cache}"\r\n'
+            f'pushd "{testdrive_exe.parent}"\r\n'
+            f'"{testdrive_exe}" %*\r\n'
+            'set "TD_RC=%ERRORLEVEL%"\r\n'
+            "popd\r\n"
+            "endlocal & exit /b %TD_RC%\r\n",
             encoding="utf-8",
         )
     else:
@@ -685,6 +786,17 @@ def print_report(report):
         print(details)
 
 
+def _plugin_is_installed(report_value) -> bool:
+    """True only if the plugin's report text contains the literal
+    'installed : yes' emitted by _format_install_status(). Any error
+    string, 'FAILED: ...' message, or a genuine 'installed : no' all
+    evaluate to False -- exactly what --check-installed needs to catch,
+    without needing separate plumbing through bootstrap() /
+    provision_plugins() / inspect_existing()'s differently-shaped
+    reports."""
+    return "installed : yes" in str(report_value)
+
+
 def main(argv=None):
     args = parse_args(argv)
     logging.basicConfig(
@@ -700,7 +812,17 @@ def main(argv=None):
         platform.platform(),
     )
 
-    td_home = Path(args.testdrive_home).expanduser()
+    td_home = Path(args.testdrive_home).expanduser().resolve()
+    # Resolved to an absolute path deliberately: every subprocess call
+    # below (venv python, pip install, `-T`/`-TT`/`-I`) is invoked with an
+    # explicit cwd= (see _safe_cwd(), pip_install()'s cwd=source_dir,
+    # etc.). subprocess resolves a *relative* argv[0] against that new
+    # cwd, not the process's original cwd -- so a relative td_home leaked
+    # into env_python and then broke the very first subprocess call that
+    # combined it with a different cwd (e.g. `pip install -e .[dev]`
+    # with cwd=<source_dir>), raising a spurious
+    # FileNotFoundError: .../cache/pyenv/<platform>/framework/bin/python
+    # even though that file exists relative to the shell's own cwd.
     plugins = load_plugins(args.plugins)
 
     if args.remove_home:
@@ -723,12 +845,23 @@ def main(argv=None):
                 cache,
             )
 
-    if not td_home.exists():
+    # "Does testdrive already exist here?" must be bound to something
+    # deeper than td_home itself (or even than cache/) -- td_home can
+    # exist with only a half-built cache/ from a failed prior run, which
+    # would otherwise get treated as "already installed" and routed to
+    # inspect_existing() instead of a fresh bootstrap. framework_env_dir()
+    # (.../cache/pyenv/<platform>/framework) is only ever fully present
+    # after a bootstrap actually completes, so it's a much more reliable
+    # signal than td_home.exists().
+    framework_dir = framework_env_dir(td_home)
+
+    if not framework_dir.exists():
         if args.plugin_provisioning:
             log.error(
-                "--plugin-provisioning requires an existing testdrive home "
-                "(got missing path %s). Omit the flag to bootstrap from scratch.",
-                td_home,
+                "--plugin-provisioning requires an existing testdrive "
+                "install (framework env not found at %s). Omit the flag "
+                "to bootstrap from scratch.",
+                framework_dir,
             )
             sys.exit(2)
         report = bootstrap(
@@ -737,6 +870,7 @@ def main(argv=None):
             args.python_path,
             plugins,
             insecure=args.insecure,
+            reuse_existing_source=args.remove_cache,
         )
     elif args.plugin_provisioning:
         env_python = framework_python(td_home)
@@ -770,6 +904,15 @@ def main(argv=None):
         for v in report.values()
     ):
         sys.exit(1)
+
+    if args.check_installed:
+        not_installed = [p for p in plugins if not _plugin_is_installed(report.get(p))]
+        if not_installed:
+            log.warning(
+                "--check-installed: the following plugin(s) are NOT installed: %s",
+                ", ".join(not_installed),
+            )
+            sys.exit(1)
 
 
 if __name__ == "__main__":
