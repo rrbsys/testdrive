@@ -70,7 +70,7 @@ PLUGIN = {
     "requirements": [
         {"pip": "Pillow", "module": "PIL"},
         {
-            "pip": "numpy>=1,<2; sys_platform == 'darwin' and python_version <= '3.12'",
+            "pip": "numpy>=1,<2; sys_platform == 'darwin'",
             "module": "numpy",
         },
         {"pip": "opencv-python", "module": "cv2"},

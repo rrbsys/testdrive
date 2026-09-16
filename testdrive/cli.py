@@ -875,6 +875,8 @@ def _run_detect_one(
                 detections,
                 replace_minchar=plugin.manifest.replace_minchar,
                 replace_eval=plugin.manifest.replace_eval,
+                redact_text=plugin.manifest.redact_text,
+                redact_bgcolor=plugin.manifest.redact_bgcolor,
             ),
             redacted_path,
         )

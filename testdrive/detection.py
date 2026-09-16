@@ -273,6 +273,12 @@ class PluginManifest:
     replace_minchar: int = 0
     replace_eval: str = ""
 
+    #: Optional full-image (or per-detection) redaction overlay text.
+    #: When set, ``annotate.redact`` paints ``redact_bgcolor`` and draws
+    #: this text centred and auto-scaled to ~90 % of the covered area.
+    redact_text: str = ""
+    redact_bgcolor: str = ""
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PluginManifest":
         if "id" not in data:
