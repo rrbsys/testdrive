@@ -49,63 +49,156 @@ def _get_draw_module() -> tuple[ModuleType, ModuleType]:
         raise ImportError("Pillow is required for annotation: pip install Pillow") from exc
 
 
-def _get_font(size: int = 14) -> Any:
-    """Return a PIL TrueType font, falling back gracefully to the built-in default.
+# Font candidates, ordered by preference. CJK-capable fonts first so
+# Chinese/Japanese/Korean replacement text does not render as tofu
+# (empty rectangles). Latin-only fonts follow as a fallback.
+_FONT_CANDIDATES_CJK = (
+    # Linux / cross-platform Noto & WenQuanYi
+    "NotoSansCJK-Regular.ttc",
+    "NotoSansCJKsc-Regular.otf",
+    "NotoSansCJKsc-Regular.ttc",
+    "NotoSansSC-Regular.otf",
+    "NotoSansSC-Regular.ttf",
+    "SourceHanSansSC-Regular.otf",
+    "SourceHanSans-Regular.ttc",
+    "WenQuanYi Micro Hei.ttf",
+    "WenQuanYiZenHei.ttf",
+    "wqy-microhei.ttc",
+    "wqy-zenhei.ttc",
+    "DroidSansFallbackFull.ttf",
+    "DroidSansFallback.ttf",
+    # macOS
+    "PingFang.ttc",
+    "/System/Library/Fonts/PingFang.ttc",
+    "Hiragino Sans GB.ttc",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "STHeiti Light.ttc",
+    "/System/Library/Fonts/STHeiti Light.ttc",
+    "Arial Unicode.ttf",
+    "/Library/Fonts/Arial Unicode.ttf",
+    # Windows
+    "msyh.ttc",  # Microsoft YaHei
+    "msyh.ttf",
+    "simhei.ttf",
+    "simsun.ttc",
+    "simsun.ttf",
+    "msyhl.ttc",
+    "Arial Unicode MS.ttf",
+)
 
-    Tries well-known absolute paths first so large point sizes work even when
-    the process CWD is not a font directory.
+_FONT_CANDIDATES_LATIN = (
+    "DejaVuSans.ttf",
+    "arial.ttf",
+    "Arial.ttf",
+    "FreeSans.ttf",
+    "LiberationSans-Regular.ttf",
+)
+
+
+def _text_needs_cjk(text: str) -> bool:
+    """True if *text* contains characters outside the basic Latin block
+    that typically require a CJK (or at least Unicode-rich) font."""
+    for ch in text:
+        o = ord(ch)
+        # CJK Unified Ideographs, Hiragana, Katakana, Hangul, fullwidth, etc.
+        if o > 0x02FF:
+            return True
+    return False
+
+
+def _get_font(size: int = 14, *, text: str = "") -> Any:
+    """Return a PIL font, falling back gracefully to the built-in default.
+
+    When *text* contains CJK (or other non-Latin) characters, CJK-capable
+    fonts are tried first so the glyphs actually exist. Prefers a
+    scalable TrueType/OpenType font so callers can request different
+    sizes (used by the redaction text-fitting path). The bitmap default
+    ignores the size argument.
     """
     try:
         from PIL import ImageFont
-    except ImportError:
+
+        candidates = (
+            _FONT_CANDIDATES_CJK + _FONT_CANDIDATES_LATIN
+            if _text_needs_cjk(text)
+            else _FONT_CANDIDATES_LATIN + _FONT_CANDIDATES_CJK
+        )
+        for name in candidates:
+            try:
+                return ImageFont.truetype(name, size)
+            except (OSError, IOError):
+                continue
+        # PIL built-in bitmap font - always available, small but readable
+        return ImageFont.load_default()
+    except Exception:  # noqa: BLE001 - never crash the annotation engine
         return None
 
-    candidates = [
-        # Linux (Debian/Ubuntu, Fedora, Arch, etc.)
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/TTF/DejaVuSans.ttf",
-        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
-        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
-        "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
-        # macOS (system + user Library)
-        "/System/Library/Fonts/Supplemental/Arial.ttf",
-        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-        "/System/Library/Fonts/Helvetica.ttc",
-        "/System/Library/Fonts/SFNS.ttf",
-        "/System/Library/Fonts/SFNSText.ttf",
-        "/Library/Fonts/Arial.ttf",
-        "/Library/Fonts/Arial Unicode.ttf",
-        "/Library/Fonts/Helvetica.ttc",
-        # Windows
-        "C:/Windows/Fonts/arial.ttf",
-        "C:/Windows/Fonts/Arial.ttf",
-        "C:/Windows/Fonts/segoeui.ttf",
-        # Bare names (CWD or fontconfig path)
-        "DejaVuSans.ttf",
-        "arial.ttf",
-        "Arial.ttf",
-        "Helvetica.ttc",
-    ]
-    for path in candidates:
-        try:
-            # .ttc collections need an explicit face index on some Pillow builds
-            if path.lower().endswith(".ttc"):
-                return ImageFont.truetype(path, size, index=0)
-            return ImageFont.truetype(path, size)
-        except (OSError, IOError, ValueError):
-            continue
+
+def _measure_text(draw: Any, text: str, font: Any) -> tuple[int, int]:
+    """Return (width, height) of *text* rendered with *font*."""
     try:
-        # PIL built-in bitmap font – always available but tiny / non-scalable
-        return ImageFont.load_default()
-    except Exception:  # noqa: BLE001
-        return None
+        # Pillow ≥ 8.0
+        bbox = draw.textbbox((0, 0), text, font=font)
+        return int(bbox[2] - bbox[0]), int(bbox[3] - bbox[1])
+    except AttributeError:
+        try:
+            # Older Pillow: textsize was removed in favour of textbbox.
+            size = draw.textsize(text, font=font)
+            return int(size[0]), int(size[1])
+        except Exception:  # noqa: BLE001
+            return len(text) * 6, 11  # crude fallback
+
+
+def _fit_text_in_box(
+    draw: Any,
+    text: str,
+    box: tuple[int, int, int, int],
+    *,
+    fill_ratio: float = 0.9,
+    min_size: int = 6,
+    max_size: int = 200,
+) -> tuple[Any, int, int] | tuple[None, int, int]:
+    """Find a font size and centered position so *text* fits inside *box*.
+
+    Scales the font so the rendered text occupies at most *fill_ratio*
+    of both the box width and height (the tighter constraint wins).
+    Chooses a CJK-capable font automatically when *text* needs one.
+    Returns ``(font, x, y)`` for the top-left of the centered text, or
+    ``(None, x1+2, y1+1)`` if no usable font could be loaded.
+    """
+    x1, y1, x2, y2 = box
+    box_w = max(1, x2 - x1)
+    box_h = max(1, y2 - y1)
+    target_w = box_w * fill_ratio
+    target_h = box_h * fill_ratio
+
+    # Binary search for the largest size that still fits.
+    lo, hi = min_size, max_size
+    best_font = None
+    best_w, best_h = 0, 0
+
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        font = _get_font(mid, text=text)
+        if font is None:
+            break
+        tw, th = _measure_text(draw, text, font)
+        if tw <= target_w and th <= target_h:
+            best_font = font
+            best_w, best_h = tw, th
+            lo = mid + 1
+        else:
+            hi = mid - 1
+
+    if best_font is None:
+        # Last resort: fixed-size font, top-left padding (old behaviour).
+        font = _get_font(14, text=text)
+        return font, x1 + 2, y1 + 1
+
+    # Center inside the box.
+    tx = x1 + (box_w - best_w) // 2
+    ty = y1 + (box_h - best_h) // 2
+    return best_font, tx, ty
 
 
 def draw_boxes(
@@ -224,116 +317,6 @@ _REDACT_TEXT_BG = "#FFFFFF"  # white box behind a replace_eval'd item
 _REDACT_TEXT_FG = "#000000"  # black text drawn on top of it
 
 
-def _measure_text(draw: Any, text: str, font: Any) -> tuple[int, int]:
-    """Return (width, height) of *text* rendered with *font*."""
-    try:
-        bbox = draw.textbbox((0, 0), text, font=font)
-        return int(bbox[2] - bbox[0]), int(bbox[3] - bbox[1])
-    except AttributeError:
-        tw, th = draw.textsize(text, font=font)
-        return int(tw), int(th)
-
-
-def _wrap_text(draw: Any, text: str, font: Any, max_w: int) -> list[str]:
-    """Greedy word-wrap *text* so each line fits within *max_w* pixels."""
-    words = text.split()
-    if not words:
-        return [""]
-
-    lines: list[str] = []
-    current = words[0]
-    for word in words[1:]:
-        trial = current + " " + word
-        tw, _ = _measure_text(draw, trial, font)
-        if tw <= max_w:
-            current = trial
-        else:
-            lines.append(current)
-            current = word
-    lines.append(current)
-    return lines
-
-
-def _block_size(draw: Any, lines: list[str], font: Any, line_gap: float = 1.15) -> tuple[int, int]:
-    """Return (width, height) of a multi-line block."""
-    if not lines:
-        return 0, 0
-    widths = []
-    heights = []
-    for line in lines:
-        tw, th = _measure_text(draw, line, font)
-        widths.append(tw)
-        heights.append(th)
-    block_w = max(widths) if widths else 0
-    # Approximate inter-line spacing from the tallest single line
-    line_h = max(heights) if heights else 0
-    block_h = int(line_h * line_gap * (len(lines) - 1) + line_h) if lines else 0
-    return block_w, block_h
-
-
-def _fit_centered_text(
-    draw: Any,
-    text: str,
-    box: tuple[int, int, int, int],
-    *,
-    target_frac: float = 0.9,
-    fill: str = "#000000",
-) -> None:
-    """Draw *text* centred inside *box*, auto-scaled to *target_frac* of the area.
-
-    Longer strings are word-wrapped.  Binary-searches a TrueType font size
-    so the resulting multi-line block occupies roughly ``target_frac`` of
-    the box width *and* height (tighter constraint wins).
-    """
-    x1, y1, x2, y2 = box
-    box_w = max(1, x2 - x1)
-    box_h = max(1, y2 - y1)
-    max_w = max(1, int(box_w * target_frac))
-    max_h = max(1, int(box_h * target_frac))
-
-    lo, hi = 4, max(box_h * 2, 32)
-    best_font = None
-    best_lines: list[str] = [text]
-    best_bw = best_bh = 0
-
-    for _ in range(20):
-        if lo > hi:
-            break
-        mid = (lo + hi) // 2
-        font = _get_font(mid)
-        if font is None:
-            break
-
-        lines = _wrap_text(draw, text, font, max_w)
-        bw, bh = _block_size(draw, lines, font)
-
-        if bw <= max_w and bh <= max_h:
-            best_font = font
-            best_lines = lines
-            best_bw, best_bh = bw, bh
-            lo = mid + 1
-        else:
-            hi = mid - 1
-
-    if best_font is None:
-        best_font = _get_font(max(12, min(box_h // 10, 48)))
-        if best_font is None:
-            return
-        best_lines = _wrap_text(draw, text, best_font, max_w)
-        best_bw, best_bh = _block_size(draw, best_lines, best_font)
-
-    # Vertical start so the whole block is centred
-    ty = y1 + (box_h - best_bh) // 2
-    # Per-line height for stepping
-    _, single_h = _measure_text(draw, best_lines[0] if best_lines else "X", best_font)
-    line_step = int(single_h * 1.15)
-
-    for i, line in enumerate(best_lines):
-        tw, _ = _measure_text(draw, line, best_font)
-        tx = x1 + (box_w - tw) // 2
-        draw.text((tx, ty + i * line_step), line, fill=fill, font=best_font)
-
-
 def redact(
     image: "PILImage.Image",
     detections: list[Detection],
@@ -342,8 +325,6 @@ def redact(
     replace_minchar: int = 0,
     replace_eval: str = "",
     font_size: int = 14,
-    redact_text: str = "",
-    redact_bgcolor: str = "",
 ) -> "PILImage.Image":
     """Return a copy of *image* with each detection redacted.
 
@@ -358,28 +339,23 @@ def redact(
         whenever a detection has no ``text``, *replace_eval* is empty
         — i.e. the plugin isn't configured for word-/line-level
         masking at all — or *replace_eval* evaluates to ``None`` for
-        that particular detection).  Overridden by *redact_bgcolor*
-        when the latter is non-empty.
+        that particular detection).
     replace_minchar, replace_eval:
         For detections that carry ``Detection.text`` (per-word/
         per-line OCR detections — see ``PluginManifest.replace_minchar``/
         ``replace_eval``), only used when *replace_eval* is non-empty:
 
-        * text of length <= *replace_minchar* is considered too short
+        * text of length < *replace_minchar* is considered too short
           to matter and is left completely untouched — no box is
           drawn over it at all, so the original pixels show through.
-        * longer text is masked by evaluating *replace_eval* (with
-          ``text`` bound to the detected text). If the expression
-          evaluates to a real value, it's drawn as black text over a
-          white box (not the plain black rectangle used elsewhere), so
-          the redaction is legible rather than just an opaque block.
-          If it evaluates to ``None``, this detection instead falls
-          back to the plain solid-rectangle redaction.
-    redact_text, redact_bgcolor:
-        Optional plugin-level overlay.  When *redact_text* is non-empty
-        the rectangle is filled with *redact_bgcolor* (or *fill_color*
-        if the bgcolor is empty) and the text is drawn centred and
-        auto-scaled to ~90 % of the detection area.
+        * text of length >= *replace_minchar* is masked by evaluating
+          *replace_eval* (with ``text`` bound to the detected text).
+          If the expression evaluates to a real value, it's drawn as
+          black text over a white box (not the plain black rectangle
+          used elsewhere), centered and scaled to ~90 % of the box so
+          the redaction stays legible. If it evaluates to ``None``,
+          this detection instead falls back to the plain solid-
+          rectangle redaction.
     """
     _, ImageDraw = _get_draw_module()
 
@@ -390,37 +366,26 @@ def redact(
         log.debug("redact: no detections to redact")
         return result
 
-    font = _get_font(font_size) if replace_eval else None
-    effective_fill = redact_bgcolor or fill_color
-
     for det in detections:
         x1, y1, x2, y2 = det.bbox
 
         if det.text and replace_eval:
             text = det.text
-            if len(text) <= replace_minchar:
-                # Short enough to leave as-is: draw nothing, original
+            if len(text) < replace_minchar:
+                # Shorter than the threshold: leave as-is, original
                 # pixels stay visible.
                 continue
             masked = _eval_replacement(text, replace_eval)
             if masked is not None:
                 draw.rectangle([x1, y1, x2, y2], fill=_REDACT_TEXT_BG)
+                font, tx, ty = _fit_text_in_box(draw, masked, (x1, y1, x2, y2), fill_ratio=0.9)
                 if font is not None:
-                    draw.text((x1 + 2, y1 + 1), masked, fill=_REDACT_TEXT_FG, font=font)
+                    draw.text((tx, ty), masked, fill=_REDACT_TEXT_FG, font=font)
                 continue
             # replace_eval deliberately opted this one out (-> None):
             # fall through to the plain solid-rectangle redaction below.
 
-        draw.rectangle([x1, y1, x2, y2], fill=effective_fill)
-
-        if redact_text:
-            _fit_centered_text(
-                draw,
-                redact_text,
-                (x1, y1, x2, y2),
-                target_frac=0.9,
-                fill="#000000",
-            )
+        draw.rectangle([x1, y1, x2, y2], fill=fill_color)
 
     log.debug("redact: redacted %d detection(s)", len(detections))
     return result

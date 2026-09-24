@@ -256,11 +256,11 @@ class PluginManifest:
     #: ``-redacted.*`` output image and used as the default for the
     #: CLI's ``--replace-minchar``/``--replace-eval`` overrides.
     #:
-    #: ``replace_minchar`` is the minimum text length a detected item
-    #: must exceed before ``replace_eval`` is applied at all — shorter
-    #: text (length <= this) is left exactly as detected, mirroring
-    #: the redact-short-strings-as-is convention used elsewhere in this
-    #: codebase. ``replace_eval`` is a Python expression, evaluated
+    #: ``replace_minchar`` is the minimum text length that triggers
+    #: ``replace_eval``: text with ``len(text) < replace_minchar`` is
+    #: left exactly as detected; text with ``len(text) >= replace_minchar``
+    #: is masked. (So the default of 4 means words of 4+ characters are
+    #: redacted.) ``replace_eval`` is a Python expression, evaluated
     #: with a single local variable ``text`` bound to the detected
     #: text, whose result replaces it in the rendered redaction (e.g.
     #: ``"text[:1] + '*' * (len(text) - 1)"`` keeps the 1st character
@@ -272,12 +272,6 @@ class PluginManifest:
     #: rectangle.
     replace_minchar: int = 0
     replace_eval: str = ""
-
-    #: Optional full-image (or per-detection) redaction overlay text.
-    #: When set, ``annotate.redact`` paints ``redact_bgcolor`` and draws
-    #: this text centred and auto-scaled to ~90 % of the covered area.
-    redact_text: str = ""
-    redact_bgcolor: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PluginManifest":

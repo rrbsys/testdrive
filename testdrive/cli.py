@@ -22,6 +22,14 @@ Loop mode:
     --output-dir DIR sends all -matches/-redacted output there instead
     of next to each input image.
 
+    --redaction-text TEXTFILE (OCR-text plugins only, e.g. paddleocr
+    ocrword/ocrline): bypass detect() and regenerate *-redacted.* from
+    an existing <plugin>_redactions.json + <plugin>_text.txt using the
+    lines of TEXTFILE as the new per-detection texts. Only the entries
+    that differ from the original <plugin>_text.txt are redacted; the
+    rest are left completely untouched. Requires matching line/item
+    counts; prints how many texts differ vs total.
+
 Cache discipline:
     A plain detect run (``testdrive <plugin> <image> <prompt>``) never
     downloads a model — if it isn't cached yet, the run fails fast with
@@ -41,7 +49,7 @@ import re
 import sys
 import tempfile
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -158,9 +166,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="N",
         help="override a plugin's manifest 'replace_minchar' (see manifest "
-        "'replace_eval'): detected text of length <= N is left as-is in the "
-        "'-redacted.*' output image. Only meaningful for plugins that emit "
-        "per-word/per-line detections (e.g. paddleocr's 'ocrword'/'ocrline' prompts).",
+        "'replace_eval'): detected text of length < N is left as-is in the "
+        "'-redacted.*' output image; length >= N is replaced. Only meaningful "
+        "for plugins that emit per-word/per-line detections (e.g. paddleocr's "
+        "'ocrword'/'ocrline' prompts).",
     )
     parser.add_argument(
         "--replace-eval",
@@ -168,12 +177,26 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="EXPR",
         help="override a plugin's manifest 'replace_eval': a Python expression, "
-        "evaluated with 'text' bound to each detected word/line longer than "
+        "evaluated with 'text' bound to each detected word/line of length >= "
         "--replace-minchar, whose result replaces it in the '-redacted.*' output "
         "image (e.g. \"text[:1] + '*' * (len(text) - 1)\"; an expression evaluating "
         "to None falls back to a plain solid-black redaction for that one item). "
         "Only meaningful for plugins that emit per-word/per-line detections (e.g. "
         "paddleocr's 'ocrword'/'ocrline' prompts).",
+    )
+    parser.add_argument(
+        "--redaction-text",
+        type=str,
+        default=None,
+        metavar="TEXTFILE",
+        help="for OCR-text-capable plugins (e.g. paddleocr with ocrword/ocrline): "
+        "bypass detect() and regenerate *-redacted.* images from an existing "
+        "<plugin>_redactions.json + <plugin>_text.txt, using the lines of TEXTFILE "
+        "as the replacement texts (must have the same line count as the existing "
+        "files). Only entries whose text differs from the original <plugin>_text.txt "
+        "are redacted; identical ones are left completely untouched. "
+        "Sanity-checks the three counts first. Ends with a summary of how many "
+        "texts differ vs total. Works for both framework-env and private-env plugins.",
     )
     parser.add_argument(
         "--no-auto-provision",
@@ -875,8 +898,6 @@ def _run_detect_one(
                 detections,
                 replace_minchar=plugin.manifest.replace_minchar,
                 replace_eval=plugin.manifest.replace_eval,
-                redact_text=plugin.manifest.redact_text,
-                redact_bgcolor=plugin.manifest.redact_bgcolor,
             ),
             redacted_path,
         )
@@ -1032,6 +1053,235 @@ def _collect_redaction_entry(
     return entry, None
 
 
+def _cmd_redaction_text(
+    plugin_arg: str,
+    image_arg: str,
+    textfile: Path,
+    as_json: bool,
+    output_dir: Path | None,
+    replace_minchar_override: int | None = None,
+    replace_eval_override: str | None = None,
+) -> int:
+    """Regenerate *-redacted.* images from existing <plugin>_redactions.json
+    + <plugin>_text.txt using the lines of *textfile* as the new texts.
+
+    Only meaningful for OCR-text-capable plugins (those that previously
+    wrote a non-empty <plugin>_text.txt). Sanity-checks that
+    len(textfile lines) == len(<plugin>_text.txt lines) ==
+    len(<plugin>_redactions.json items) before doing any work.
+
+    Crucially, only the entries whose textfile line differs from the
+    corresponding original <plugin>_text.txt line are redacted. Entries
+    that are identical are left completely untouched (original pixels
+    remain visible). The summary reports how many differed vs total.
+    """
+    if plugin_arg == LOOP_ALL:
+        log.error("--redaction-text does not support plugin='*' (specify a single plugin)")
+        return ExitCode.CLI_ERROR
+
+    rid = plugin_arg
+    image_paths, err = _expand_image_arg(image_arg)
+    if err:
+        log.error("%s", err)
+        return ExitCode.CLI_ERROR
+
+    is_imagedir = Path(image_arg).is_dir()
+    redactions_dir = (
+        output_dir
+        if output_dir is not None
+        else (Path(image_arg) if is_imagedir else image_paths[0].parent)
+    )
+
+    json_path = redactions_dir / f"{rid}_redactions.json"
+    orig_text_path = redactions_dir / f"{rid}_text.txt"
+
+    if not json_path.is_file():
+        log.error(
+            "--redaction-text requires an existing %s (run a normal detect first)",
+            json_path,
+        )
+        return ExitCode.CLI_ERROR
+    if not orig_text_path.is_file():
+        log.error(
+            "--redaction-text requires an existing %s (plugin must be OCR-text-capable "
+            "and must have produced per-word/per-line detections)",
+            orig_text_path,
+        )
+        return ExitCode.CLI_ERROR
+    if not textfile.is_file():
+        log.error("--redaction-text: text file not found: %s", textfile)
+        return ExitCode.CLI_ERROR
+
+    try:
+        entries: list[dict[str, Any]] = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        log.error("could not read %s: %s", json_path, exc)
+        return ExitCode.CLI_ERROR
+
+    try:
+        orig_lines = orig_text_path.read_text(encoding="utf-8").splitlines()
+        new_lines = textfile.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        log.error("could not read text file(s): %s", exc)
+        return ExitCode.CLI_ERROR
+
+    n_entries = len(entries)
+    n_orig = len(orig_lines)
+    n_new = len(new_lines)
+
+    if not (n_entries == n_orig == n_new):
+        log.error(
+            "sanity check failed: #items in %s = %d, #lines in %s = %d, "
+            "#lines in %s = %d — all three must be equal",
+            json_path.name,
+            n_entries,
+            orig_text_path.name,
+            n_orig,
+            textfile.name,
+            n_new,
+        )
+        return ExitCode.CLI_ERROR
+
+    if n_entries == 0:
+        log.info("no redactions to apply (empty files)")
+        if not as_json:
+            print("Redaction-text: 0 different / 0 total")
+        return ExitCode.SUCCESS
+
+    # Load plugin only for its manifest (replace_minchar / replace_eval).
+    # We never call initialize() or detect(), so this is safe for both
+    # framework-env and private-env plugins.
+    try:
+        loaded = load_plugin(rid)
+    except PluginLoadError as exc:
+        log.error("plugin '%s' could not be loaded: %s", rid, exc)
+        return ExitCode.PLUGIN_NOT_FOUND
+
+    plugin = loaded.instantiate()
+    if replace_minchar_override is not None or replace_eval_override is not None:
+        plugin.set_replace_override(minchar=replace_minchar_override, expr=replace_eval_override)
+
+    # Group only the *differing* entries by imagename. Identical
+    # (new_text == orig_text) ones must not be redacted at all in this
+    # mode — we load the original source image and only paint the m
+    # changed boxes, leaving the n-m unchanged regions untouched.
+    by_image: dict[str, list[Detection]] = defaultdict(list)
+    n_different = 0
+    for entry, orig_text, new_text in zip(entries, orig_lines, new_lines):
+        imagename = entry.get("imagename")
+        if not imagename:
+            log.error("entry in %s missing 'imagename': %s", json_path.name, entry)
+            return ExitCode.CLI_ERROR
+        rect = entry.get("rectangle")
+        if not (isinstance(rect, (list, tuple)) and len(rect) == 4):
+            log.error("entry in %s has invalid 'rectangle': %s", json_path.name, entry)
+            return ExitCode.CLI_ERROR
+
+        if new_text == orig_text:
+            # Unchanged → leave original pixels alone (no Detection →
+            # nothing drawn by redact()).
+            continue
+
+        n_different += 1
+        label = entry.get("label", "")
+        score = float(entry.get("confidence", 0.0))
+        # Prefer the text_kind key that was stored ("word"/"line"/...) if present.
+        text_kind = None
+        for k in ("word", "line", "text"):
+            if k in entry:
+                text_kind = k
+                break
+        det = Detection(
+            label=str(label),
+            score=score,
+            bbox=(int(rect[0]), int(rect[1]), int(rect[2]), int(rect[3])),
+            text=new_text,
+            text_kind=text_kind,
+        )
+        by_image[imagename].append(det)
+
+    # Resolve image paths we actually have, keyed by basename.
+    # Always regenerate every input image: only the differing detections
+    # are painted; identical ones are left as original pixels. Images
+    # with zero diffs therefore become a clean copy of the source.
+    image_by_name: dict[str, Path] = {p.name: p for p in image_paths}
+    any_failed = False
+    n_written = 0
+
+    # Warn about JSON entries whose imagename is not among the inputs.
+    for imagename in by_image:
+        if imagename not in image_by_name:
+            log.warning(
+                "imagename %r from %s not found among input images; its "
+                "differing redaction(s) will be skipped",
+                imagename,
+                json_path.name,
+            )
+
+    for image_path in image_paths:
+        imagename = image_path.name
+        dets = by_image.get(imagename, [])
+        try:
+            image = load_image(image_path)
+        except Exception as exc:  # noqa: BLE001
+            log.error("could not load %s: %s", image_path, exc)
+            any_failed = True
+            continue
+
+        # Derive redacted path the same way normal detect does (match_count
+        # is only for the -matches filename; redacted path does not embed it).
+        # Single-plugin run: no suffix. (We already reject plugin='*'.)
+        _, redacted_path = derive_output_paths(
+            image_path,
+            plugin_suffix=None,
+            output_dir=output_dir,
+            match_count=len(dets),
+        )
+        try:
+            # In this mode the textfile supplies the *final* strings to
+            # paint. Force identity replacement so the exact textfile
+            # content is drawn (white box + that string). The normal
+            # plugin replace_minchar/replace_eval are intentionally
+            # bypassed — only the m differing entries are present in
+            # dets; the n-m identical ones were never turned into
+            # Detections and therefore stay as original pixels.
+            save_image(
+                redact(
+                    image,
+                    dets,
+                    replace_minchar=0,
+                    replace_eval="text",
+                ),
+                redacted_path,
+            )
+            log.info("wrote %s (%d redaction(s))", redacted_path, len(dets))
+            if not as_json:
+                print(f"Redacted   : {redacted_path}  ({len(dets)} match(es))")
+            n_written += 1
+        except (OSError, ImportError) as exc:
+            log.error("could not write %s: %s", redacted_path, exc)
+            any_failed = True
+
+    summary = f"{n_different} different / {n_entries} total"
+    log.info("redaction-text summary: %s", summary)
+    if not as_json:
+        print(f"Redaction-text: {summary}")
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "plugin": rid,
+                    "different": n_different,
+                    "total": n_entries,
+                    "images_written": n_written,
+                },
+                indent=2,
+            )
+        )
+
+    return ExitCode.LOOP_PARTIAL_FAILURE if any_failed else ExitCode.SUCCESS
+
+
 def cmd_detect_dispatch(
     plugin_arg: str,
     image_arg: str,
@@ -1042,6 +1292,7 @@ def cmd_detect_dispatch(
     model_override: str | None = None,
     replace_minchar_override: int | None = None,
     replace_eval_override: str | None = None,
+    redaction_text: str | None = None,
 ) -> int:
     """Handle ``<plugin> <image> <prompt>``, where ``<plugin>`` may be
     ``'*'`` (every discovered plugin) and ``<image>`` may be a directory
@@ -1049,7 +1300,23 @@ def cmd_detect_dispatch(
     combinations with one code path; the plain single-plugin/single-image
     case prints exactly as before, everything else prints a per-run
     header plus a final tally, matching existing loop-mode conventions.
+
+    When *redaction_text* is set, detection is bypassed entirely and
+    *-redacted.* images are regenerated from an existing
+    ``<plugin>_redactions.json`` + ``<plugin>_text.txt`` using the
+    supplied text file as the new per-detection replacement texts.
     """
+    if redaction_text is not None:
+        return _cmd_redaction_text(
+            plugin_arg=plugin_arg,
+            image_arg=image_arg,
+            textfile=Path(redaction_text),
+            as_json=as_json,
+            output_dir=output_dir,
+            replace_minchar_override=replace_minchar_override,
+            replace_eval_override=replace_eval_override,
+        )
+
     if plugin_arg == LOOP_ALL:
         plugin_ids = sorted(p.manifest.id for p in iter_loadable_plugins())
         if not plugin_ids:
@@ -1534,6 +1801,7 @@ def _dispatch(parser: argparse.ArgumentParser, ns: argparse.Namespace) -> int:
             model_override=ns.model,
             replace_minchar_override=ns.replace_minchar,
             replace_eval_override=ns.replace_eval,
+            redaction_text=ns.redaction_text,
         )
 
     positional = [x for x in (ns.plugin, ns.image, ns.prompt) if x]
